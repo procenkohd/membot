@@ -137,6 +137,8 @@ cancel_kb = ReplyKeyboardMarkup(
 BTN_SUBMIT_THIS = "📮 В предложку"
 BTN_SUBMITTED = "✅ Отправлено"
 
+MEME_CAPTION = "мем-машина без вкуса и совести: @randomem_bot"
+
 
 def try_again_kb(submitted: bool = False) -> InlineKeyboardMarkup:
     submit_btn = (
@@ -324,6 +326,7 @@ async def custom_meme_got_text(message: Message, state: FSMContext, bot: Bot) ->
     await state.set_state(None)
     await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
+        caption=MEME_CAPTION,
         reply_markup=submit_this_kb(),
     )
 
@@ -351,6 +354,7 @@ async def handle_photo(message: Message, state: FSMContext, bot: Bot) -> None:
     await state.update_data(last_photo_file_id=photo.file_id, last_submit_text=submit_text)
     await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
+        caption=MEME_CAPTION,
         reply_markup=try_again_kb(),
     )
 
@@ -377,6 +381,7 @@ async def handle_document_photo(message: Message, state: FSMContext, bot: Bot) -
     await state.update_data(last_photo_file_id=doc.file_id, last_submit_text=submit_text)
     await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
+        caption=MEME_CAPTION,
         reply_markup=try_again_kb(),
     )
 
@@ -409,6 +414,7 @@ async def try_again(callback: CallbackQuery, state: FSMContext, bot: Bot) -> Non
     await state.update_data(last_photo_file_id=file_id, last_submit_text=submit_text)
     await callback.message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
+        caption=MEME_CAPTION,
         reply_markup=try_again_kb(),
     )
 
