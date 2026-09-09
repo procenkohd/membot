@@ -1,8 +1,11 @@
 """
 Постироничный мем-бот.
 Кидаешь фото -> получаешь фото с максимально всратой надписью Impact-стилем.
-Плюс кнопки: "Добавить фразу" (любой юзер пополняет базу) и
-"Свой мем" (юзер сам загружает фото и сам пишет текст).
+Плюс кнопки: "Добавить фразу" (любой юзер пополняет базу),
+"Свой мем" (юзер сам загружает фото и сам пишет текст),
+"Попробуй ещё" (новая случайная надпись на последнее фото) и
+"Предложить в канал" (предложка с ручной модерацией).
+Вообще ВСЕ действия в боте доступны только подписчикам канала (CHANNEL_ID).
 
 Запуск:
     export BOT_TOKEN="токен_от_BotFather"
@@ -13,36 +16,112 @@ import asyncio
 import logging
 import os
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     Message,
+    CallbackQuery,
     BufferedInputFile,
     ReplyKeyboardMarkup,
     KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
 )
 
 from phrasebank import get_random_phrase, parse_phrase, add_phrase
 from memegen import make_meme
+import stats
+import submission_queue
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0") or "0")
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip()  # например @my_channel или -100...
 
 dp = Dispatcher(storage=MemoryStorage())
 
+
+async def is_subscribed(bot: Bot, user_id: int) -> bool:
+    """Проверяет подписку на канал. Если канал ещё не настроен — не блокируем."""
+    if not CHANNEL_ID:
+        return True
+    try:
+        member = await bot.get_chat_member(CHANNEL_ID, user_id)
+        return member.status in ("member", "administrator", "creator")
+    except Exception:
+        logger.exception("Failed to check channel subscription")
+        return False
+
+
+def subscribe_kb() -> InlineKeyboardMarkup:
+    channel_url = f"https://t.me/{CHANNEL_ID.lstrip('@')}" if CHANNEL_ID else "https://t.me"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="➡️ Подписаться на канал", url=channel_url)],
+            [InlineKeyboardButton(text="✅ Проверить", callback_data="check_sub")],
+        ]
+    )
+
+
+class StatsMiddleware(BaseMiddleware):
+    """Отмечает чат как активный в текущем месяце на любое сообщение."""
+
+    async def __call__(self, handler, event: Message, data):
+        if event.chat:
+            try:
+                stats.track(event.chat.id)
+            except Exception:
+                logger.exception("Failed to track stats")
+        return await handler(event, data)
+
+
+dp.message.middleware(StatsMiddleware())
+
+
+class SubscriptionGateMiddleware(BaseMiddleware):
+    """Блокирует вообще любое действие в боте, пока юзер не подписан на канал.
+    Саму кнопку «Проверить» (check_sub) всегда пропускает — иначе юзер
+    не сможет подтвердить подписку."""
+
+    async def __call__(self, handler, event, data):
+        if isinstance(event, CallbackQuery) and event.data == "check_sub":
+            return await handler(event, data)
+
+        user = event.from_user
+        bot: Bot = data["bot"]
+        if user and not await is_subscribed(bot, user.id):
+            text = (
+                "чтобы пользоваться ботом, нужно быть подписанным на канал.\n"
+                "подпишись и нажми «Проверить»"
+            )
+            if isinstance(event, CallbackQuery):
+                await event.answer()
+                await event.message.answer(text, reply_markup=subscribe_kb())
+            else:
+                await event.answer(text, reply_markup=subscribe_kb())
+            return  # дальше хендлер не пускаем
+
+        return await handler(event, data)
+
+dp.message.middleware(SubscriptionGateMiddleware())
+dp.callback_query.middleware(SubscriptionGateMiddleware())
+
 BTN_ADD_PHRASE = "✍️ Добавить фразу"
 BTN_CUSTOM_MEME = "🖼 Свой мем"
+BTN_SUBMIT = "📮 Предложить в канал"
 BTN_HELP = "❓ Помощь"
 BTN_CANCEL = "✖️ Отмена"
+BTN_TRY_AGAIN = "🔁 Попробуй ещё"
 
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text=BTN_ADD_PHRASE), KeyboardButton(text=BTN_CUSTOM_MEME)],
+        [KeyboardButton(text=BTN_SUBMIT)],
         [KeyboardButton(text=BTN_HELP)],
     ],
     resize_keyboard=True,
@@ -54,21 +133,34 @@ cancel_kb = ReplyKeyboardMarkup(
 )
 
 
+def try_again_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=BTN_TRY_AGAIN, callback_data="try_again")]]
+    )
+
+
 class MemeStates(StatesGroup):
     waiting_phrase = State()          # ждём текст новой фразы для базы
     waiting_custom_photo = State()    # ждём фото для своего мема
     waiting_custom_text = State()     # ждём текст для своего мема
+    waiting_submit_photo = State()    # ждём фото для предложки
+    waiting_submit_text = State()     # ждём текст (или "-") для предложки
 
 
-HELP_TEXT = (
-    "скинь фото — получишь случайный мем.\n\n"
-    "кнопки:\n"
-    f"{BTN_ADD_PHRASE} — добавить свою фразу в общую базу\n"
-    f"{BTN_CUSTOM_MEME} — загрузить своё фото и написать текст самому\n\n"
-    "команды (для тех кто любит текстом):\n"
-    "/add текст — то же самое что кнопка, но одним сообщением\n"
-    "/reset — сбросить очередь показанных фраз для этого чата"
-)
+def build_help_text() -> str:
+    count = stats.monthly_active_count()
+    users_line = f"\nботом пользуются ~{count} человек в этом месяце\n" if count >= 5 else ""
+    return (
+        "скинь фото — получишь случайный мем.\n"
+        f"{users_line}\n"
+        "кнопки:\n"
+        f"{BTN_ADD_PHRASE} — добавить свою фразу в общую базу\n"
+        f"{BTN_CUSTOM_MEME} — загрузить своё фото и написать текст самому\n"
+        f"{BTN_SUBMIT} — предложить мем в канал (после ручной проверки)\n\n"
+        "команды (для тех кто любит текстом):\n"
+        "/add текст — то же самое что кнопка, но одним сообщением\n"
+        "/reset — сбросить очередь показанных фраз для этого чата"
+    )
 
 
 # ---------- старт и помощь ----------
@@ -76,13 +168,13 @@ HELP_TEXT = (
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer(HELP_TEXT, reply_markup=main_kb)
+    await message.answer(build_help_text(), reply_markup=main_kb)
 
 
 @dp.message(Command("help"))
 @dp.message(F.text == BTN_HELP)
 async def cmd_help(message: Message) -> None:
-    await message.answer(HELP_TEXT, reply_markup=main_kb)
+    await message.answer(build_help_text(), reply_markup=main_kb)
 
 
 @dp.message(Command("reset"))
@@ -200,7 +292,7 @@ async def custom_meme_got_text(message: Message, state: FSMContext, bot: Bot) ->
 # ---------- обычный режим: просто прислали фото -> случайный мем ----------
 
 @dp.message(StateFilter(None), F.photo)
-async def handle_photo(message: Message, bot: Bot) -> None:
+async def handle_photo(message: Message, state: FSMContext, bot: Bot) -> None:
     photo = message.photo[-1]
     file = await bot.get_file(photo.file_id)
     file_bytes = await bot.download_file(file.file_path)
@@ -216,13 +308,15 @@ async def handle_photo(message: Message, bot: Bot) -> None:
         await message.answer("что-то пошло не так при генерации, но это тоже часть постиронии")
         return
 
+    await state.update_data(last_photo_file_id=photo.file_id)
     await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
+        reply_markup=try_again_kb(),
     )
 
 
 @dp.message(StateFilter(None), F.document & F.document.mime_type.startswith("image/"))
-async def handle_document_photo(message: Message, bot: Bot) -> None:
+async def handle_document_photo(message: Message, state: FSMContext, bot: Bot) -> None:
     # если фото прислали "файлом", без сжатия
     doc = message.document
     file = await bot.get_file(doc.file_id)
@@ -239,9 +333,177 @@ async def handle_document_photo(message: Message, bot: Bot) -> None:
         await message.answer("что-то пошло не так при генерации, но это тоже часть постиронии")
         return
 
+    await state.update_data(last_photo_file_id=doc.file_id)
     await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
+        reply_markup=try_again_kb(),
     )
+
+
+@dp.callback_query(F.data == "try_again")
+async def try_again(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    data = await state.get_data()
+    file_id = data.get("last_photo_file_id")
+    if not file_id:
+        await callback.answer("не нашёл предыдущее фото, кинь новое", show_alert=True)
+        return
+
+    await callback.answer()
+
+    file = await bot.get_file(file_id)
+    file_bytes = await bot.download_file(file.file_path)
+    image_bytes = file_bytes.read()
+
+    phrase = get_random_phrase(callback.message.chat.id)
+    top, bottom = parse_phrase(phrase)
+
+    try:
+        meme_buf = make_meme(image_bytes, top, bottom or "")
+    except Exception:
+        logger.exception("Failed to render meme (try again)")
+        await callback.message.answer("что-то пошло не так, но это тоже часть постиронии")
+        return
+
+    await callback.message.answer_photo(
+        BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
+        reply_markup=try_again_kb(),
+    )
+
+
+# ---------- предложка: фото (+ опционально текст) на модерацию ----------
+
+
+@dp.message(F.text == BTN_SUBMIT)
+async def submit_start(message: Message, state: FSMContext) -> None:
+    await state.set_state(MemeStates.waiting_submit_photo)
+    await message.answer(
+        "пришли фото, которое хочешь предложить в канал",
+        reply_markup=cancel_kb,
+    )
+
+
+@dp.callback_query(F.data == "check_sub")
+async def check_sub(callback: CallbackQuery, bot: Bot) -> None:
+    if await is_subscribed(bot, callback.from_user.id):
+        await callback.answer("подписка подтверждена!")
+        await callback.message.answer(
+            "отлично, теперь можно пользоваться ботом:",
+            reply_markup=main_kb,
+        )
+    else:
+        await callback.answer("пока не вижу подписку, попробуй ещё раз через пару секунд", show_alert=True)
+
+
+@dp.message(MemeStates.waiting_submit_photo, F.photo)
+async def submit_got_photo(message: Message, state: FSMContext) -> None:
+    photo = message.photo[-1]
+    await state.update_data(submit_photo_file_id=photo.file_id)
+    await state.set_state(MemeStates.waiting_submit_text)
+    await message.answer(
+        "теперь пришли текст для мема (можно с | для верх/низ),\n"
+        "или отправь просто «-», если текст не нужен — фото уйдёт как есть",
+        reply_markup=cancel_kb,
+    )
+
+
+@dp.message(MemeStates.waiting_submit_photo)
+async def submit_wrong_input(message: Message) -> None:
+    await message.answer("жду именно фото. пришли картинку, или нажми «✖️ Отмена»")
+
+
+@dp.message(MemeStates.waiting_submit_text, F.text)
+async def submit_got_text(message: Message, state: FSMContext, bot: Bot) -> None:
+    data = await state.get_data()
+    file_id = data.get("submit_photo_file_id")
+    if not file_id:
+        await state.clear()
+        await message.answer("что-то потерялось, давай заново", reply_markup=main_kb)
+        return
+
+    text = message.text.strip()
+    if text == "-":
+        text = ""
+
+    sub_id = submission_queue.add_submission(file_id, text, message.chat.id)
+    await state.clear()
+    await message.answer(
+        "отправил на модерацию, спасибо! если одобрят — попадёт в канал",
+        reply_markup=main_kb,
+    )
+
+    if not ADMIN_ID:
+        return
+
+    review_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve:{sub_id}"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject:{sub_id}"),
+        ]]
+    )
+    caption = f"Заявка #{sub_id}\nТекст: {text or '(без текста)'}"
+    try:
+        await bot.send_photo(ADMIN_ID, file_id, caption=caption, reply_markup=review_kb)
+    except Exception:
+        logger.exception("Failed to notify admin about submission")
+
+
+@dp.callback_query(F.data.startswith("approve:"))
+async def approve_submission(callback: CallbackQuery, bot: Bot) -> None:
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("только админ может это делать", show_alert=True)
+        return
+
+    sub_id = callback.data.split(":", 1)[1]
+    sub = submission_queue.get_submission(sub_id)
+    if not sub or sub.get("status") != "pending":
+        await callback.answer("уже обработано", show_alert=True)
+        return
+
+    if not CHANNEL_ID:
+        await callback.answer("канал не настроен (переменная CHANNEL_ID)", show_alert=True)
+        return
+
+    try:
+        if sub["text"]:
+            file = await bot.get_file(sub["photo_file_id"])
+            file_bytes = await bot.download_file(file.file_path)
+            image_bytes = file_bytes.read()
+            top, bottom = parse_phrase(sub["text"])
+            meme_buf = make_meme(image_bytes, top, bottom or "")
+            await bot.send_photo(CHANNEL_ID, BufferedInputFile(meme_buf.read(), filename="meme.jpg"))
+        else:
+            await bot.send_photo(CHANNEL_ID, sub["photo_file_id"])
+    except Exception:
+        logger.exception("Failed to post submission to channel")
+        await callback.answer("не получилось запостить в канал", show_alert=True)
+        return
+
+    submission_queue.set_status(sub_id, "approved")
+    await callback.answer("опубликовано")
+    try:
+        await callback.message.edit_caption(caption=(callback.message.caption or "") + "\n\n✅ ОДОБРЕНО")
+    except Exception:
+        pass
+
+
+@dp.callback_query(F.data.startswith("reject:"))
+async def reject_submission(callback: CallbackQuery) -> None:
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("только админ может это делать", show_alert=True)
+        return
+
+    sub_id = callback.data.split(":", 1)[1]
+    sub = submission_queue.get_submission(sub_id)
+    if not sub or sub.get("status") != "pending":
+        await callback.answer("уже обработано", show_alert=True)
+        return
+
+    submission_queue.set_status(sub_id, "rejected")
+    await callback.answer("отклонено")
+    try:
+        await callback.message.edit_caption(caption=(callback.message.caption or "") + "\n\n❌ ОТКЛОНЕНО")
+    except Exception:
+        pass
 
 
 async def main() -> None:
