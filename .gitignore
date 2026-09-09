@@ -1,0 +1,7 @@
+downloads/
+venv/
+__pycache__/
+*.session
+state.json
+stats.json
+submissions.json
