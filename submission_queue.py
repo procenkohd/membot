@@ -46,3 +46,17 @@ def set_status(sub_id: str, status: str) -> None:
     if sub_id in data:
         data[sub_id]["status"] = status
         _save(data)
+
+
+def set_text(sub_id: str, text: str) -> None:
+    data = _load()
+    if sub_id in data:
+        data[sub_id]["text"] = text
+        _save(data)
+
+
+def set_admin_message_id(sub_id: str, message_id: int) -> None:
+    data = _load()
+    if sub_id in data:
+        data[sub_id]["admin_message_id"] = message_id
+        _save(data)

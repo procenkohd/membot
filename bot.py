@@ -3,9 +3,13 @@
 Кидаешь фото -> получаешь фото с максимально всратой надписью Impact-стилем.
 Плюс кнопки: "Добавить фразу" (любой юзер пополняет базу),
 "Свой мем" (юзер сам загружает фото и сам пишет текст),
-"Попробуй ещё" (новая случайная надпись на последнее фото) и
-"Предложить в канал" (предложка с ручной модерацией — постится как обычный
-пост с подписью, без наложения текста на картинку).
+"Попробуй ещё" (новая случайная надпись на последнее фото),
+"В предложку" (мгновенно предложить уже готовый мем — картинка с текстом
+остаётся как есть, отдельно спрашивается только подпись к посту, можно
+пустую) и "Предложить в канал" (тот же путь вручную: свои фото + подпись).
+Предложка — ручная модерация: админ видит заявку с кнопками
+Одобрить/Отклонить/Изменить текст, посты уходят в канал с подписью как
+обычный пост, без наложения текста на картинку.
 Вообще ВСЕ действия в боте доступны только подписчикам канала (CHANNEL_ID).
 
 Запуск:
@@ -163,18 +167,30 @@ def submit_this_kb(submitted: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[submit_btn]])
 
 
+def build_review_kb(sub_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve:{sub_id}"),
+                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject:{sub_id}"),
+            ],
+            [InlineKeyboardButton(text="✏️ Изменить текст", callback_data=f"edit:{sub_id}")],
+        ]
+    )
+
+
+def build_admin_caption(sub_id: str, text: str) -> str:
+    return f"Заявка #{sub_id}\nТекст: {text or '(без текста)'}"
+
+
 async def notify_admin_submission(bot: Bot, sub_id: str, text: str, file_id: str) -> None:
     if not ADMIN_ID:
         return
-    review_kb = InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve:{sub_id}"),
-            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject:{sub_id}"),
-        ]]
-    )
-    caption = f"Заявка #{sub_id}\nТекст: {text or '(без текста)'}"
     try:
-        await bot.send_photo(ADMIN_ID, file_id, caption=caption, reply_markup=review_kb)
+        sent = await bot.send_photo(
+            ADMIN_ID, file_id, caption=build_admin_caption(sub_id, text), reply_markup=build_review_kb(sub_id)
+        )
+        submission_queue.set_admin_message_id(sub_id, sent.message_id)
     except Exception:
         logger.exception("Failed to notify admin about submission")
 
@@ -185,6 +201,10 @@ class MemeStates(StatesGroup):
     waiting_custom_text = State()     # ждём текст для своего мема
     waiting_submit_photo = State()    # ждём фото для предложки
     waiting_submit_text = State()     # ждём текст (или "-") для предложки
+
+
+class AdminStates(StatesGroup):
+    editing_text = State()            # ждём от админа новый текст для заявки
 
 
 def build_help_text() -> str:
@@ -322,13 +342,13 @@ async def custom_meme_got_text(message: Message, state: FSMContext, bot: Bot) ->
         await state.clear()
         return
 
-    await state.update_data(custom_submit_photo_file_id=file_id, custom_submit_text=message.text.strip())
     await state.set_state(None)
-    await message.answer_photo(
+    sent = await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
         caption=MEME_CAPTION,
         reply_markup=submit_this_kb(),
     )
+    await state.update_data(custom_rendered_file_id=sent.photo[-1].file_id)
 
 
 # ---------- обычный режим: просто прислали фото -> случайный мем ----------
@@ -350,13 +370,12 @@ async def handle_photo(message: Message, state: FSMContext, bot: Bot) -> None:
         await message.answer("что-то пошло не так при генерации, но это тоже часть постиронии")
         return
 
-    submit_text = " ".join(part for part in (top, bottom) if part)
-    await state.update_data(last_photo_file_id=photo.file_id, last_submit_text=submit_text)
-    await message.answer_photo(
+    sent = await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
         caption=MEME_CAPTION,
         reply_markup=try_again_kb(),
     )
+    await state.update_data(last_photo_file_id=photo.file_id, last_rendered_file_id=sent.photo[-1].file_id)
 
 
 @dp.message(StateFilter(None), F.document & F.document.mime_type.startswith("image/"))
@@ -377,13 +396,12 @@ async def handle_document_photo(message: Message, state: FSMContext, bot: Bot) -
         await message.answer("что-то пошло не так при генерации, но это тоже часть постиронии")
         return
 
-    submit_text = " ".join(part for part in (top, bottom) if part)
-    await state.update_data(last_photo_file_id=doc.file_id, last_submit_text=submit_text)
-    await message.answer_photo(
+    sent = await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
         caption=MEME_CAPTION,
         reply_markup=try_again_kb(),
     )
+    await state.update_data(last_photo_file_id=doc.file_id, last_rendered_file_id=sent.photo[-1].file_id)
 
 
 @dp.callback_query(F.data == "try_again")
@@ -410,53 +428,58 @@ async def try_again(callback: CallbackQuery, state: FSMContext, bot: Bot) -> Non
         await callback.message.answer("что-то пошло не так, но это тоже часть постиронии")
         return
 
-    submit_text = " ".join(part for part in (top, bottom) if part)
-    await state.update_data(last_photo_file_id=file_id, last_submit_text=submit_text)
-    await callback.message.answer_photo(
+    sent = await callback.message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
         caption=MEME_CAPTION,
         reply_markup=try_again_kb(),
     )
+    await state.update_data(last_photo_file_id=file_id, last_rendered_file_id=sent.photo[-1].file_id)
 
 
 @dp.callback_query(F.data == "submit_last")
-async def submit_last(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+async def submit_last(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
-    file_id = data.get("last_photo_file_id")
-    if not file_id:
-        await callback.answer("не нашёл фото, кинь новое", show_alert=True)
+    rendered_file_id = data.get("last_rendered_file_id")
+    if not rendered_file_id:
+        await callback.answer("не нашёл мем, кинь фото заново", show_alert=True)
         return
 
-    text = data.get("last_submit_text", "")
-    sub_id = submission_queue.add_submission(file_id, text, callback.message.chat.id)
-    await callback.answer("отправил на модерацию, спасибо!", show_alert=True)
-
+    await callback.answer()
     try:
         await callback.message.edit_reply_markup(reply_markup=try_again_kb(submitted=True))
     except Exception:
         pass
 
-    await notify_admin_submission(bot, sub_id, text, file_id)
+    await state.update_data(submit_photo_file_id=rendered_file_id)
+    await state.set_state(MemeStates.waiting_submit_text)
+    await callback.message.answer(
+        "теперь пришли текст для подписи к посту,\n"
+        "или отправь просто «-», если подпись не нужна — мем уйдёт как есть",
+        reply_markup=cancel_kb,
+    )
 
 
 @dp.callback_query(F.data == "submit_custom")
-async def submit_custom(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+async def submit_custom(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
-    file_id = data.get("custom_submit_photo_file_id")
-    if not file_id:
-        await callback.answer("не нашёл фото, загрузи заново", show_alert=True)
+    rendered_file_id = data.get("custom_rendered_file_id")
+    if not rendered_file_id:
+        await callback.answer("не нашёл мем, загрузи заново", show_alert=True)
         return
 
-    text = data.get("custom_submit_text", "")
-    sub_id = submission_queue.add_submission(file_id, text, callback.message.chat.id)
-    await callback.answer("отправил на модерацию, спасибо!", show_alert=True)
-
+    await callback.answer()
     try:
         await callback.message.edit_reply_markup(reply_markup=submit_this_kb(submitted=True))
     except Exception:
         pass
 
-    await notify_admin_submission(bot, sub_id, text, file_id)
+    await state.update_data(submit_photo_file_id=rendered_file_id)
+    await state.set_state(MemeStates.waiting_submit_text)
+    await callback.message.answer(
+        "теперь пришли текст для подписи к посту,\n"
+        "или отправь просто «-», если подпись не нужна — мем уйдёт как есть",
+        reply_markup=cancel_kb,
+    )
 
 
 @dp.callback_query(F.data == "noop")
@@ -580,6 +603,58 @@ async def reject_submission(callback: CallbackQuery) -> None:
         await callback.message.edit_caption(caption=(callback.message.caption or "") + "\n\n❌ ОТКЛОНЕНО")
     except Exception:
         pass
+
+
+@dp.callback_query(F.data.startswith("edit:"))
+async def edit_submission_start(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("только админ может это делать", show_alert=True)
+        return
+
+    sub_id = callback.data.split(":", 1)[1]
+    sub = submission_queue.get_submission(sub_id)
+    if not sub or sub.get("status") != "pending":
+        await callback.answer("уже обработано", show_alert=True)
+        return
+
+    await state.update_data(editing_sub_id=sub_id)
+    await state.set_state(AdminStates.editing_text)
+    await callback.answer()
+    await callback.message.answer(
+        f"пришли новый текст подписи для заявки #{sub_id} (или «-» чтобы убрать подпись)"
+    )
+
+
+@dp.message(AdminStates.editing_text, F.text)
+async def edit_submission_finish(message: Message, state: FSMContext, bot: Bot) -> None:
+    data = await state.get_data()
+    sub_id = data.get("editing_sub_id")
+    await state.clear()
+    if not sub_id:
+        return
+
+    sub = submission_queue.get_submission(sub_id)
+    if not sub or sub.get("status") != "pending":
+        await message.answer("заявка уже обработана")
+        return
+
+    new_text = message.text.strip()
+    if new_text == "-":
+        new_text = ""
+    submission_queue.set_text(sub_id, new_text)
+    await message.answer(f"текст заявки #{sub_id} обновлён")
+
+    admin_message_id = sub.get("admin_message_id")
+    if admin_message_id:
+        try:
+            await bot.edit_message_caption(
+                chat_id=ADMIN_ID,
+                message_id=admin_message_id,
+                caption=build_admin_caption(sub_id, new_text),
+                reply_markup=build_review_kb(sub_id),
+            )
+        except Exception:
+            logger.exception("Failed to update admin caption after edit")
 
 
 async def main() -> None:
