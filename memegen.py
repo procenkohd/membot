@@ -14,11 +14,14 @@ from PIL import Image, ImageDraw, ImageFont
 FONTS_DIR = Path(__file__).parent / "fonts"
 
 # Настоящий Impact не поддерживает кириллицу, поэтому для классического
-# мема есть выбор из двух шрифтов с кириллицей — жирный капс (Oswald) и
-# рукописный курсив (Marck Script) — какой выпадет, решает рандом.
+# мема есть выбор из шрифтов с кириллицей — три жирных капса (Oswald,
+# Roboto Condensed, Rubik) и рукописный Pacifico — какой выпадет, решает
+# рандом. Marck Script убрали: с обводкой был нечитаемым.
 FONT_CHOICES = [
     {"path": FONTS_DIR / "Oswald-Variable.ttf", "weight": 700, "upper": True},
-    {"path": FONTS_DIR / "MarckScript-Regular.ttf", "weight": None, "upper": False},
+    {"path": FONTS_DIR / "RobotoCondensed-Variable.ttf", "weight": 800, "upper": True},
+    {"path": FONTS_DIR / "Rubik-Variable.ttf", "weight": 800, "upper": True},
+    {"path": FONTS_DIR / "Pacifico-Regular.ttf", "weight": None, "upper": False},
 ]
 
 DEMOTIVATOR_FONT_PATH = FONTS_DIR / "PTSerif-Italic.ttf"
