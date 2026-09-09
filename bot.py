@@ -134,10 +134,47 @@ cancel_kb = ReplyKeyboardMarkup(
 )
 
 
-def try_again_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=BTN_TRY_AGAIN, callback_data="try_again")]]
+BTN_SUBMIT_THIS = "📮 В предложку"
+BTN_SUBMITTED = "✅ Отправлено"
+
+
+def try_again_kb(submitted: bool = False) -> InlineKeyboardMarkup:
+    submit_btn = (
+        InlineKeyboardButton(text=BTN_SUBMITTED, callback_data="noop")
+        if submitted
+        else InlineKeyboardButton(text=BTN_SUBMIT_THIS, callback_data="submit_last")
     )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text=BTN_TRY_AGAIN, callback_data="try_again"),
+            submit_btn,
+        ]]
+    )
+
+
+def submit_this_kb(submitted: bool = False) -> InlineKeyboardMarkup:
+    submit_btn = (
+        InlineKeyboardButton(text=BTN_SUBMITTED, callback_data="noop")
+        if submitted
+        else InlineKeyboardButton(text=BTN_SUBMIT_THIS, callback_data="submit_custom")
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[[submit_btn]])
+
+
+async def notify_admin_submission(bot: Bot, sub_id: str, text: str, file_id: str) -> None:
+    if not ADMIN_ID:
+        return
+    review_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve:{sub_id}"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject:{sub_id}"),
+        ]]
+    )
+    caption = f"Заявка #{sub_id}\nТекст: {text or '(без текста)'}"
+    try:
+        await bot.send_photo(ADMIN_ID, file_id, caption=caption, reply_markup=review_kb)
+    except Exception:
+        logger.exception("Failed to notify admin about submission")
 
 
 class MemeStates(StatesGroup):
@@ -283,10 +320,11 @@ async def custom_meme_got_text(message: Message, state: FSMContext, bot: Bot) ->
         await state.clear()
         return
 
-    await state.clear()
+    await state.update_data(custom_submit_photo_file_id=file_id, custom_submit_text=message.text.strip())
+    await state.set_state(None)
     await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
-        reply_markup=main_kb,
+        reply_markup=submit_this_kb(),
     )
 
 
@@ -309,7 +347,8 @@ async def handle_photo(message: Message, state: FSMContext, bot: Bot) -> None:
         await message.answer("что-то пошло не так при генерации, но это тоже часть постиронии")
         return
 
-    await state.update_data(last_photo_file_id=photo.file_id)
+    submit_text = " ".join(part for part in (top, bottom) if part)
+    await state.update_data(last_photo_file_id=photo.file_id, last_submit_text=submit_text)
     await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
         reply_markup=try_again_kb(),
@@ -334,7 +373,8 @@ async def handle_document_photo(message: Message, state: FSMContext, bot: Bot) -
         await message.answer("что-то пошло не так при генерации, но это тоже часть постиронии")
         return
 
-    await state.update_data(last_photo_file_id=doc.file_id)
+    submit_text = " ".join(part for part in (top, bottom) if part)
+    await state.update_data(last_photo_file_id=doc.file_id, last_submit_text=submit_text)
     await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
         reply_markup=try_again_kb(),
@@ -365,10 +405,57 @@ async def try_again(callback: CallbackQuery, state: FSMContext, bot: Bot) -> Non
         await callback.message.answer("что-то пошло не так, но это тоже часть постиронии")
         return
 
+    submit_text = " ".join(part for part in (top, bottom) if part)
+    await state.update_data(last_photo_file_id=file_id, last_submit_text=submit_text)
     await callback.message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
         reply_markup=try_again_kb(),
     )
+
+
+@dp.callback_query(F.data == "submit_last")
+async def submit_last(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    data = await state.get_data()
+    file_id = data.get("last_photo_file_id")
+    if not file_id:
+        await callback.answer("не нашёл фото, кинь новое", show_alert=True)
+        return
+
+    text = data.get("last_submit_text", "")
+    sub_id = submission_queue.add_submission(file_id, text, callback.message.chat.id)
+    await callback.answer("отправил на модерацию, спасибо!", show_alert=True)
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=try_again_kb(submitted=True))
+    except Exception:
+        pass
+
+    await notify_admin_submission(bot, sub_id, text, file_id)
+
+
+@dp.callback_query(F.data == "submit_custom")
+async def submit_custom(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    data = await state.get_data()
+    file_id = data.get("custom_submit_photo_file_id")
+    if not file_id:
+        await callback.answer("не нашёл фото, загрузи заново", show_alert=True)
+        return
+
+    text = data.get("custom_submit_text", "")
+    sub_id = submission_queue.add_submission(file_id, text, callback.message.chat.id)
+    await callback.answer("отправил на модерацию, спасибо!", show_alert=True)
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=submit_this_kb(submitted=True))
+    except Exception:
+        pass
+
+    await notify_admin_submission(bot, sub_id, text, file_id)
+
+
+@dp.callback_query(F.data == "noop")
+async def noop_cb(callback: CallbackQuery) -> None:
+    await callback.answer("уже отправлено")
 
 
 # ---------- предложка: фото (+ опционально текст) на модерацию ----------
@@ -432,20 +519,7 @@ async def submit_got_text(message: Message, state: FSMContext, bot: Bot) -> None
         reply_markup=main_kb,
     )
 
-    if not ADMIN_ID:
-        return
-
-    review_kb = InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve:{sub_id}"),
-            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject:{sub_id}"),
-        ]]
-    )
-    caption = f"Заявка #{sub_id}\nТекст: {text or '(без текста)'}"
-    try:
-        await bot.send_photo(ADMIN_ID, file_id, caption=caption, reply_markup=review_kb)
-    except Exception:
-        logger.exception("Failed to notify admin about submission")
+    await notify_admin_submission(bot, sub_id, text, file_id)
 
 
 @dp.callback_query(F.data.startswith("approve:"))
