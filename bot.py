@@ -4,7 +4,8 @@
 Плюс кнопки: "Добавить фразу" (любой юзер пополняет базу),
 "Свой мем" (юзер сам загружает фото и сам пишет текст),
 "Попробуй ещё" (новая случайная надпись на последнее фото) и
-"Предложить в канал" (предложка с ручной модерацией).
+"Предложить в канал" (предложка с ручной модерацией — постится как обычный
+пост с подписью, без наложения текста на картинку).
 Вообще ВСЕ действия в боте доступны только подписчикам канала (CHANNEL_ID).
 
 Запуск:
@@ -465,12 +466,7 @@ async def approve_submission(callback: CallbackQuery, bot: Bot) -> None:
 
     try:
         if sub["text"]:
-            file = await bot.get_file(sub["photo_file_id"])
-            file_bytes = await bot.download_file(file.file_path)
-            image_bytes = file_bytes.read()
-            top, bottom = parse_phrase(sub["text"])
-            meme_buf = make_meme(image_bytes, top, bottom or "")
-            await bot.send_photo(CHANNEL_ID, BufferedInputFile(meme_buf.read(), filename="meme.jpg"))
+            await bot.send_photo(CHANNEL_ID, sub["photo_file_id"], caption=sub["text"])
         else:
             await bot.send_photo(CHANNEL_ID, sub["photo_file_id"])
     except Exception:
