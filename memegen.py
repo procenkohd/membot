@@ -16,13 +16,22 @@ FONTS_DIR = Path(__file__).parent / "fonts"
 # Настоящий Impact не поддерживает кириллицу, поэтому для классического
 # мема есть выбор из шрифтов с кириллицей — три жирных капса (Oswald,
 # Roboto Condensed, Rubik) и рукописный Pacifico — какой выпадет, решает
-# рандом. Marck Script убрали: с обводкой был нечитаемым.
-FONT_CHOICES = [
-    {"path": FONTS_DIR / "Oswald-Variable.ttf", "weight": 700, "upper": True},
-    {"path": FONTS_DIR / "RobotoCondensed-Variable.ttf", "weight": 800, "upper": True},
-    {"path": FONTS_DIR / "Rubik-Variable.ttf", "weight": 800, "upper": True},
-    {"path": FONTS_DIR / "Pacifico-Regular.ttf", "weight": None, "upper": False},
-]
+# рандом (если не выбран явно, см. font_id в make_classic_meme). Marck
+# Script убрали: с обводкой был нечитаемым.
+FONT_CHOICES_BY_ID = {
+    "oswald": {"path": FONTS_DIR / "Oswald-Variable.ttf", "weight": 700, "upper": True, "label": "Oswald (капс)"},
+    "roboto_condensed": {
+        "path": FONTS_DIR / "RobotoCondensed-Variable.ttf", "weight": 800, "upper": True,
+        "label": "Roboto Condensed (капс)",
+    },
+    "rubik": {"path": FONTS_DIR / "Rubik-Variable.ttf", "weight": 800, "upper": True, "label": "Rubik (капс)"},
+    "pacifico": {
+        "path": FONTS_DIR / "Pacifico-Regular.ttf", "weight": None, "upper": False,
+        "label": "Pacifico (рукописный)",
+    },
+}
+
+FONT_CHOICES = list(FONT_CHOICES_BY_ID.values())
 
 DEMOTIVATOR_FONT_PATH = FONTS_DIR / "PTSerif-Italic.ttf"
 DEMOTIVATOR_CHANCE = 0.2  # ~1 мем из 5 выходит демотиватором
@@ -116,7 +125,10 @@ def _draw_caption(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeType
         y += line_heights[i] + spacing
 
 
-def _make_classic_meme(image_bytes: bytes, top_text: str, bottom_text: str) -> BytesIO:
+def make_classic_meme(image_bytes: bytes, top_text: str, bottom_text: str,
+                       font_choice: Optional[dict] = None) -> BytesIO:
+    """Классический мем. font_choice можно передать явно (см.
+    FONT_CHOICES_BY_ID) — иначе шрифт выбирается рандомно, как раньше."""
     img = Image.open(BytesIO(image_bytes)).convert("RGB")
 
     # немного уменьшим слишком большие фото
@@ -147,7 +159,7 @@ def _make_classic_meme(image_bytes: bytes, top_text: str, bottom_text: str) -> B
     draw = ImageDraw.Draw(img)
 
     # --- визуальный рандом №2: шрифт, размер и толщина обводки гуляют ---
-    font_choice = random.choice(FONT_CHOICES)
+    font_choice = font_choice or random.choice(FONT_CHOICES)
     base_font_size = _fit_font_size(img.width)
     font_size = int(base_font_size * random.uniform(0.88, 1.12))
     font = _load_font(font_size, font_choice)
@@ -266,4 +278,4 @@ def make_meme(image_bytes: bytes, top_text: str, bottom_text: str) -> BytesIO:
             caption, subtitle = (top_text or bottom_text), ""
         return make_demotivator(image_bytes, caption, subtitle)
 
-    return _make_classic_meme(image_bytes, top_text, bottom_text)
+    return make_classic_meme(image_bytes, top_text, bottom_text)

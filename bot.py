@@ -37,7 +37,7 @@ from aiogram.types import (
 )
 
 from phrasebank import get_random_phrase, parse_phrase, add_phrase
-from memegen import make_meme
+from memegen import make_meme, make_classic_meme, make_demotivator, FONT_CHOICES_BY_ID
 import stats
 import submission_queue
 import phrase_queue
@@ -168,6 +168,24 @@ def submit_this_kb(submitted: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[submit_btn]])
 
 
+def custom_format_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🖼 Мем (текст сверху/снизу)", callback_data="custom_format:meme")],
+            [InlineKeyboardButton(text="🎬 Демотиватор", callback_data="custom_format:demotivator")],
+        ]
+    )
+
+
+def custom_font_kb() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=choice["label"], callback_data=f"custom_font:{font_id}")]
+        for font_id, choice in FONT_CHOICES_BY_ID.items()
+    ]
+    rows.append([InlineKeyboardButton(text="🎲 Любой (рандом)", callback_data="custom_font:random")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def build_review_kb(sub_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -228,6 +246,8 @@ async def notify_admin_phrase_submission(bot: Bot, sub_id: str, text: str) -> No
 class MemeStates(StatesGroup):
     waiting_phrase = State()          # ждём текст новой фразы для базы
     waiting_custom_photo = State()    # ждём фото для своего мема
+    waiting_custom_format = State()   # ждём выбор формата: мем/демотиватор
+    waiting_custom_font = State()     # ждём выбор шрифта (только для формата "мем")
     waiting_custom_text = State()     # ждём текст для своего мема
     waiting_submit_photo = State()    # ждём фото для предложки
     waiting_submit_text = State()     # ждём текст (или "-") для предложки
@@ -241,11 +261,12 @@ def build_help_text() -> str:
     count = stats.monthly_active_count()
     users_line = f"\nботом пользуются ~{count} человек в этом месяце\n" if count >= 5 else ""
     return (
-        "скинь фото — получишь случайный мем.\n"
+        "скинь фото просто так (без кнопок) — получишь случайный мем со случайной надписью.\n"
         f"{users_line}\n"
         "кнопки:\n"
         f"{BTN_ADD_PHRASE} — добавить свою фразу в общую базу\n"
-        f"{BTN_CUSTOM_MEME} — загрузить своё фото и написать текст самому\n"
+        f"{BTN_CUSTOM_MEME} — загрузить своё фото и самому написать для него текст "
+        "(это не рандомный мем — надпись придумываешь ты)\n"
         f"{BTN_SUBMIT} — предложить мем в канал (после ручной проверки)\n\n"
         "команды (для тех кто любит текстом):\n"
         "/add текст — то же самое что кнопка, но одним сообщением\n"
@@ -330,26 +351,68 @@ async def add_phrase_finish(message: Message, state: FSMContext, bot: Bot) -> No
 @dp.message(F.text == BTN_CUSTOM_MEME)
 async def custom_meme_start(message: Message, state: FSMContext) -> None:
     await state.set_state(MemeStates.waiting_custom_photo)
-    await message.answer("пришли фото, на котором сделать мем", reply_markup=cancel_kb)
+    await message.answer(
+        "здесь текст на мем придумываешь ты сам — пришли фото, а потом свой текст к нему.\n\n"
+        "если нужен рандомный мем со случайной надписью — жми «✖️ Отмена» "
+        "и просто скинь фото без этой кнопки, мем придёт сразу.",
+        reply_markup=cancel_kb,
+    )
 
 
 @dp.message(MemeStates.waiting_custom_photo, F.photo)
 async def custom_meme_got_photo(message: Message, state: FSMContext) -> None:
     photo = message.photo[-1]
     await state.update_data(custom_photo_file_id=photo.file_id)
+    await state.set_state(MemeStates.waiting_custom_format)
+    await message.answer("фото принял. какой формат нужен?", reply_markup=custom_format_kb())
+
+
+@dp.message(MemeStates.waiting_custom_photo)
+async def custom_meme_wrong_input(message: Message) -> None:
+    await message.answer("жду именно фото. пришли картинку, или нажми «✖️ Отмена»")
+
+
+@dp.callback_query(F.data.startswith("custom_format:"), MemeStates.waiting_custom_format)
+async def custom_format_chosen(callback: CallbackQuery, state: FSMContext) -> None:
+    fmt = callback.data.split(":", 1)[1]
+    await state.update_data(custom_format=fmt)
+    await callback.answer()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    if fmt == "demotivator":
+        await state.set_state(MemeStates.waiting_custom_text)
+        await callback.message.answer(
+            "теперь напиши подпись для демотиватора.\n"
+            "можно с | чтобы добавить мелкую строку под основной подписью, например:\n"
+            "основная подпись|мелкая подстрочная строка\n\n"
+            "без | будет только основная подпись.",
+            reply_markup=cancel_kb,
+        )
+    else:
+        await state.set_state(MemeStates.waiting_custom_font)
+        await callback.message.answer("выбери шрифт для надписи:", reply_markup=custom_font_kb())
+
+
+@dp.callback_query(F.data.startswith("custom_font:"), MemeStates.waiting_custom_font)
+async def custom_font_chosen(callback: CallbackQuery, state: FSMContext) -> None:
+    font_id = callback.data.split(":", 1)[1]
+    await state.update_data(custom_font_id=None if font_id == "random" else font_id)
     await state.set_state(MemeStates.waiting_custom_text)
-    await message.answer(
+    await callback.answer()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.message.answer(
         "теперь напиши текст для мема.\n"
         "можно с | чтобы разделить на верх/низ, например:\n"
         "верхний текст|нижний текст\n\n"
         "без | весь текст встанет снизу.",
         reply_markup=cancel_kb,
     )
-
-
-@dp.message(MemeStates.waiting_custom_photo)
-async def custom_meme_wrong_input(message: Message) -> None:
-    await message.answer("жду именно фото. пришли картинку, или нажми «✖️ Отмена»")
 
 
 @dp.message(MemeStates.waiting_custom_text, F.text)
@@ -361,6 +424,7 @@ async def custom_meme_got_text(message: Message, state: FSMContext, bot: Bot) ->
         await message.answer("что-то потерялось, давай заново", reply_markup=main_kb)
         return
 
+    fmt = data.get("custom_format", "meme")
     top, bottom = parse_phrase(message.text.strip())
 
     file = await bot.get_file(file_id)
@@ -368,7 +432,16 @@ async def custom_meme_got_text(message: Message, state: FSMContext, bot: Bot) ->
     image_bytes = file_bytes.read()
 
     try:
-        meme_buf = make_meme(image_bytes, top, bottom or "")
+        if fmt == "demotivator":
+            if top:
+                caption, subtitle = top, bottom
+            else:
+                caption, subtitle = bottom, ""
+            meme_buf = make_demotivator(image_bytes, caption, subtitle)
+        else:
+            font_id = data.get("custom_font_id")
+            font_choice = FONT_CHOICES_BY_ID.get(font_id) if font_id else None
+            meme_buf = make_classic_meme(image_bytes, top, bottom or "", font_choice=font_choice)
     except Exception:
         logger.exception("Failed to render custom meme")
         await message.answer("не получилось собрать мем, но это тоже часть постиронии", reply_markup=main_kb)
