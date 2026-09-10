@@ -7,7 +7,9 @@ import json
 from pathlib import Path
 from typing import Dict, Optional
 
-QUEUE_FILE = Path(__file__).parent / "submissions.json"
+from storage import data_path
+
+QUEUE_FILE = data_path("submissions.json")
 
 
 def _load() -> Dict[str, dict]:

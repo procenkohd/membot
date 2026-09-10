@@ -9,7 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
-STATS_FILE = Path(__file__).parent / "stats.json"
+from storage import data_path
+
+STATS_FILE = data_path("stats.json")
 
 
 def _month_key(dt: datetime) -> str:

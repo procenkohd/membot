@@ -9,9 +9,11 @@ import random
 from pathlib import Path
 from typing import List, Tuple, Optional
 
+from storage import data_path
+
 PHRASES_FILE = Path(__file__).parent / "phrases.txt"
-USER_PHRASES_FILE = Path(__file__).parent / "phrases_user.txt"
-STATE_FILE = Path(__file__).parent / "state.json"
+USER_PHRASES_FILE = data_path("phrases_user.txt")
+STATE_FILE = data_path("state.json")
 
 
 def _read_lines(path: Path) -> List[str]:

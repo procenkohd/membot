@@ -5,3 +5,7 @@ __pycache__/
 state.json
 stats.json
 submissions.json
+phrase_submissions.json
+phrases_user.txt
+data/
+.playwright-mcp/
