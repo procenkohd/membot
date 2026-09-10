@@ -40,6 +40,7 @@ from phrasebank import get_random_phrase, parse_phrase, add_phrase
 from memegen import make_meme
 import stats
 import submission_queue
+import phrase_queue
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -195,6 +196,35 @@ async def notify_admin_submission(bot: Bot, sub_id: str, text: str, file_id: str
         logger.exception("Failed to notify admin about submission")
 
 
+def build_phrase_review_kb(sub_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve_phrase:{sub_id}"),
+                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_phrase:{sub_id}"),
+            ],
+        ]
+    )
+
+
+def build_phrase_admin_caption(sub_id: str, text: str) -> str:
+    return f"Новая фраза #{sub_id}\n{text}"
+
+
+async def notify_admin_phrase_submission(bot: Bot, sub_id: str, text: str) -> None:
+    if not ADMIN_ID:
+        return
+    try:
+        sent = await bot.send_message(
+            ADMIN_ID,
+            build_phrase_admin_caption(sub_id, text),
+            reply_markup=build_phrase_review_kb(sub_id),
+        )
+        phrase_queue.set_admin_message_id(sub_id, sent.message_id)
+    except Exception:
+        logger.exception("Failed to notify admin about phrase submission")
+
+
 class MemeStates(StatesGroup):
     waiting_phrase = State()          # ждём текст новой фразы для базы
     waiting_custom_photo = State()    # ждём фото для своего мема
@@ -263,13 +293,14 @@ async def add_phrase_start(message: Message, state: FSMContext) -> None:
         "пришли текст фразы, которую добавить в базу.\n"
         "можно с | чтобы разделить на верх/низ, например:\n"
         "я узнал|что бот теперь умнее меня\n\n"
-        "без | вся фраза пойдёт вниз мема.",
+        "без | вся фраза пойдёт вниз мема.\n"
+        "фраза уйдёт на модерацию админу.",
         reply_markup=cancel_kb,
     )
 
 
 @dp.message(Command("add"))
-async def cmd_add(message: Message) -> None:
+async def cmd_add(message: Message, bot: Bot) -> None:
     text = message.text.partition(" ")[2].strip()
     if not text:
         await message.answer(
@@ -277,19 +308,21 @@ async def cmd_add(message: Message) -> None:
             "/add я узнал|что бот теперь умнее меня"
         )
         return
-    add_phrase(text)
-    await message.answer("добавил в базу, спасибо")
+    sub_id = phrase_queue.add_submission(text, message.chat.id)
+    await notify_admin_phrase_submission(bot, sub_id, text)
+    await message.answer("отправил на модерацию, спасибо! если одобрят — попадёт в базу")
 
 
 @dp.message(MemeStates.waiting_phrase, F.text)
-async def add_phrase_finish(message: Message, state: FSMContext) -> None:
+async def add_phrase_finish(message: Message, state: FSMContext, bot: Bot) -> None:
     text = message.text.strip()
     if not text:
         await message.answer("это не похоже на текст фразы, попробуй ещё раз")
         return
-    add_phrase(text)
+    sub_id = phrase_queue.add_submission(text, message.chat.id)
+    await notify_admin_phrase_submission(bot, sub_id, text)
     await state.clear()
-    await message.answer("добавил в базу, спасибо", reply_markup=main_kb)
+    await message.answer("отправил на модерацию, спасибо! если одобрят — попадёт в базу", reply_markup=main_kb)
 
 
 # ---------- свой мем: фото + свой текст ----------
@@ -655,6 +688,47 @@ async def edit_submission_finish(message: Message, state: FSMContext, bot: Bot) 
             )
         except Exception:
             logger.exception("Failed to update admin caption after edit")
+
+
+@dp.callback_query(F.data.startswith("approve_phrase:"))
+async def approve_phrase_submission(callback: CallbackQuery) -> None:
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("только админ может это делать", show_alert=True)
+        return
+
+    sub_id = callback.data.split(":", 1)[1]
+    sub = phrase_queue.get_submission(sub_id)
+    if not sub or sub.get("status") != "pending":
+        await callback.answer("уже обработано", show_alert=True)
+        return
+
+    add_phrase(sub["text"])
+    phrase_queue.set_status(sub_id, "approved")
+    await callback.answer("добавлено в базу")
+    try:
+        await callback.message.edit_text(callback.message.text + "\n\n✅ ОДОБРЕНО")
+    except Exception:
+        pass
+
+
+@dp.callback_query(F.data.startswith("reject_phrase:"))
+async def reject_phrase_submission(callback: CallbackQuery) -> None:
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("только админ может это делать", show_alert=True)
+        return
+
+    sub_id = callback.data.split(":", 1)[1]
+    sub = phrase_queue.get_submission(sub_id)
+    if not sub or sub.get("status") != "pending":
+        await callback.answer("уже обработано", show_alert=True)
+        return
+
+    phrase_queue.set_status(sub_id, "rejected")
+    await callback.answer("отклонено")
+    try:
+        await callback.message.edit_text(callback.message.text + "\n\n❌ ОТКЛОНЕНО")
+    except Exception:
+        pass
 
 
 async def main() -> None:

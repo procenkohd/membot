@@ -10,20 +10,31 @@ from pathlib import Path
 from typing import List, Tuple, Optional
 
 PHRASES_FILE = Path(__file__).parent / "phrases.txt"
+USER_PHRASES_FILE = Path(__file__).parent / "phrases_user.txt"
 STATE_FILE = Path(__file__).parent / "state.json"
 
 
-def load_phrases() -> List[str]:
-    """Читает phrases.txt заново при каждом вызове — можно дополнять файл на лету."""
-    if not PHRASES_FILE.exists():
+def _read_lines(path: Path) -> List[str]:
+    if not path.exists():
         return []
     lines = []
-    for raw in PHRASES_FILE.read_text(encoding="utf-8").splitlines():
+    for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         lines.append(line)
     return lines
+
+
+def load_phrases() -> List[str]:
+    """
+    Читает базу фраз заново при каждом вызове — можно дополнять файлы на лету.
+    Собирается из двух файлов: phrases.txt (общая база, можно пополнять
+    файлом целиком) и phrases_user.txt (фразы, одобренные через бота) —
+    так массовая загрузка файла в phrases.txt не затирает то, что уже
+    добавили пользователи через бота.
+    """
+    return _read_lines(PHRASES_FILE) + _read_lines(USER_PHRASES_FILE)
 
 
 def parse_phrase(phrase: str) -> Tuple[str, Optional[str]]:
@@ -82,8 +93,9 @@ def get_random_phrase(chat_id: int) -> str:
 
 
 def add_phrase(new_phrase: str) -> None:
-    """Дописывает новую фразу в конец базы."""
-    with PHRASES_FILE.open("a", encoding="utf-8") as f:
+    """Дописывает одобренную админом фразу в phrases_user.txt (не в общую phrases.txt,
+    чтобы не потерять её при перезаливке общей базы файлом)."""
+    with USER_PHRASES_FILE.open("a", encoding="utf-8") as f:
         f.write("\n" + new_phrase.strip())
 
 
