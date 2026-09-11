@@ -9,3 +9,4 @@ phrase_submissions.json
 phrases_user.txt
 data/
 .playwright-mcp/
+backups/
