@@ -169,6 +169,20 @@ def remember_render(data: dict, render_id: str, entry: dict) -> dict:
     return renders
 
 
+async def reset_state(state: FSMContext) -> None:
+    """
+    Как state.clear(), но не роняет data["renders"] — иначе после того как
+    сценарий (предложка/своя фраза/отмена) завершается через state.clear(),
+    кнопки "В предложку"/"Попробуй ещё" под остальными, ранее присланными
+    мемами в этом чате переставали находить свой file_id.
+    """
+    data = await state.get_data()
+    renders = data.get("renders")
+    await state.clear()
+    if renders:
+        await state.update_data(renders=renders)
+
+
 def try_again_kb(render_id: str, submitted: bool = False) -> InlineKeyboardMarkup:
     submit_btn = (
         InlineKeyboardButton(text=BTN_SUBMITTED, callback_data="noop")
@@ -325,7 +339,7 @@ async def cmd_reset(message: Message) -> None:
 
 @dp.message(F.text == BTN_CANCEL)
 async def cancel_any(message: Message, state: FSMContext) -> None:
-    await state.clear()
+    await reset_state(state)
     await message.answer("отменил. можно продолжать как обычно.", reply_markup=main_kb)
 
 
@@ -366,7 +380,7 @@ async def add_phrase_finish(message: Message, state: FSMContext, bot: Bot) -> No
         return
     sub_id = phrase_queue.add_submission(text, message.chat.id)
     await notify_admin_phrase_submission(bot, sub_id, text)
-    await state.clear()
+    await reset_state(state)
     await message.answer("отправил на модерацию, спасибо! если одобрят — попадёт в базу", reply_markup=main_kb)
 
 
@@ -444,7 +458,7 @@ async def custom_meme_got_text(message: Message, state: FSMContext, bot: Bot) ->
     data = await state.get_data()
     file_id = data.get("custom_photo_file_id")
     if not file_id:
-        await state.clear()
+        await reset_state(state)
         await message.answer("что-то потерялось, давай заново", reply_markup=main_kb)
         return
 
@@ -469,7 +483,7 @@ async def custom_meme_got_text(message: Message, state: FSMContext, bot: Bot) ->
     except Exception:
         logger.exception("Failed to render custom meme")
         await message.answer("не получилось собрать мем, но это тоже часть постиронии", reply_markup=main_kb)
-        await state.clear()
+        await reset_state(state)
         return
 
     await state.set_state(None)
@@ -685,7 +699,7 @@ async def submit_got_text(message: Message, state: FSMContext, bot: Bot) -> None
     data = await state.get_data()
     file_id = data.get("submit_photo_file_id")
     if not file_id:
-        await state.clear()
+        await reset_state(state)
         await message.answer("что-то потерялось, давай заново", reply_markup=main_kb)
         return
 
@@ -694,7 +708,7 @@ async def submit_got_text(message: Message, state: FSMContext, bot: Bot) -> None
         text = ""
 
     sub_id = submission_queue.add_submission(file_id, text, message.chat.id)
-    await state.clear()
+    await reset_state(state)
     await message.answer(
         "отправил на модерацию, спасибо! если одобрят — попадёт в канал",
         reply_markup=main_kb,
@@ -781,7 +795,7 @@ async def edit_submission_start(callback: CallbackQuery, state: FSMContext) -> N
 async def edit_submission_finish(message: Message, state: FSMContext, bot: Bot) -> None:
     data = await state.get_data()
     sub_id = data.get("editing_sub_id")
-    await state.clear()
+    await reset_state(state)
     if not sub_id:
         return
 
