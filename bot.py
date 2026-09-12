@@ -20,6 +20,7 @@
 import asyncio
 import logging
 import os
+import uuid
 
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.filters import CommandStart, Command, StateFilter
@@ -145,25 +146,48 @@ BTN_SUBMITTED = "✅ Отправлено"
 MEME_CAPTION = "мем-машина без вкуса и совести: @randomem_bot"
 
 
-def try_again_kb(submitted: bool = False) -> InlineKeyboardMarkup:
+RENDER_HISTORY_LIMIT = 20  # сколько последних мемов на чат помним для кнопок под старыми сообщениями
+
+
+def new_render_id() -> str:
+    return uuid.uuid4().hex[:10]
+
+
+def remember_render(data: dict, render_id: str, entry: dict) -> dict:
+    """
+    Кладёт рендер в data["renders"] под своим render_id, а не в общий слот —
+    иначе кнопка под старым мемом после следующей генерации подхватывала бы
+    уже новый file_id (баг: в предложку уходил последний сгенерированный мем,
+    а не тот, под которым нажали кнопку). Хранит последние RENDER_HISTORY_LIMIT
+    рендеров на чат, чтобы data не росла бесконечно.
+    """
+    renders = dict(data.get("renders", {}))
+    renders[render_id] = entry
+    if len(renders) > RENDER_HISTORY_LIMIT:
+        for old_id in list(renders.keys())[:-RENDER_HISTORY_LIMIT]:
+            del renders[old_id]
+    return renders
+
+
+def try_again_kb(render_id: str, submitted: bool = False) -> InlineKeyboardMarkup:
     submit_btn = (
         InlineKeyboardButton(text=BTN_SUBMITTED, callback_data="noop")
         if submitted
-        else InlineKeyboardButton(text=BTN_SUBMIT_THIS, callback_data="submit_last")
+        else InlineKeyboardButton(text=BTN_SUBMIT_THIS, callback_data=f"submit_last:{render_id}")
     )
     return InlineKeyboardMarkup(
         inline_keyboard=[[
-            InlineKeyboardButton(text=BTN_TRY_AGAIN, callback_data="try_again"),
+            InlineKeyboardButton(text=BTN_TRY_AGAIN, callback_data=f"try_again:{render_id}"),
             submit_btn,
         ]]
     )
 
 
-def submit_this_kb(submitted: bool = False) -> InlineKeyboardMarkup:
+def submit_this_kb(render_id: str, submitted: bool = False) -> InlineKeyboardMarkup:
     submit_btn = (
         InlineKeyboardButton(text=BTN_SUBMITTED, callback_data="noop")
         if submitted
-        else InlineKeyboardButton(text=BTN_SUBMIT_THIS, callback_data="submit_custom")
+        else InlineKeyboardButton(text=BTN_SUBMIT_THIS, callback_data=f"submit_custom:{render_id}")
     )
     return InlineKeyboardMarkup(inline_keyboard=[[submit_btn]])
 
@@ -449,12 +473,14 @@ async def custom_meme_got_text(message: Message, state: FSMContext, bot: Bot) ->
         return
 
     await state.set_state(None)
+    render_id = new_render_id()
     sent = await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
         caption=MEME_CAPTION,
-        reply_markup=submit_this_kb(),
+        reply_markup=submit_this_kb(render_id),
     )
-    await state.update_data(custom_rendered_file_id=sent.photo[-1].file_id)
+    renders = remember_render(data, render_id, {"rendered_file_id": sent.photo[-1].file_id})
+    await state.update_data(renders=renders)
 
 
 # ---------- обычный режим: просто прислали фото -> случайный мем ----------
@@ -476,12 +502,17 @@ async def handle_photo(message: Message, state: FSMContext, bot: Bot) -> None:
         await message.answer("что-то пошло не так при генерации, но это тоже часть постиронии")
         return
 
+    render_id = new_render_id()
     sent = await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
         caption=MEME_CAPTION,
-        reply_markup=try_again_kb(),
+        reply_markup=try_again_kb(render_id),
     )
-    await state.update_data(last_photo_file_id=photo.file_id, last_rendered_file_id=sent.photo[-1].file_id)
+    data = await state.get_data()
+    renders = remember_render(
+        data, render_id, {"source_file_id": photo.file_id, "rendered_file_id": sent.photo[-1].file_id}
+    )
+    await state.update_data(renders=renders)
 
 
 @dp.message(StateFilter(None), F.document & F.document.mime_type.startswith("image/"))
@@ -502,21 +533,28 @@ async def handle_document_photo(message: Message, state: FSMContext, bot: Bot) -
         await message.answer("что-то пошло не так при генерации, но это тоже часть постиронии")
         return
 
+    render_id = new_render_id()
     sent = await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
         caption=MEME_CAPTION,
-        reply_markup=try_again_kb(),
+        reply_markup=try_again_kb(render_id),
     )
-    await state.update_data(last_photo_file_id=doc.file_id, last_rendered_file_id=sent.photo[-1].file_id)
-
-
-@dp.callback_query(F.data == "try_again")
-async def try_again(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     data = await state.get_data()
-    file_id = data.get("last_photo_file_id")
-    if not file_id:
+    renders = remember_render(
+        data, render_id, {"source_file_id": doc.file_id, "rendered_file_id": sent.photo[-1].file_id}
+    )
+    await state.update_data(renders=renders)
+
+
+@dp.callback_query(F.data.startswith("try_again:"))
+async def try_again(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    render_id = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    entry = data.get("renders", {}).get(render_id)
+    if not entry:
         await callback.answer("не нашёл предыдущее фото, кинь новое", show_alert=True)
         return
+    file_id = entry["source_file_id"]
 
     await callback.answer()
 
@@ -534,25 +572,31 @@ async def try_again(callback: CallbackQuery, state: FSMContext, bot: Bot) -> Non
         await callback.message.answer("что-то пошло не так, но это тоже часть постиронии")
         return
 
+    new_id = new_render_id()
     sent = await callback.message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
         caption=MEME_CAPTION,
-        reply_markup=try_again_kb(),
+        reply_markup=try_again_kb(new_id),
     )
-    await state.update_data(last_photo_file_id=file_id, last_rendered_file_id=sent.photo[-1].file_id)
+    renders = remember_render(
+        data, new_id, {"source_file_id": file_id, "rendered_file_id": sent.photo[-1].file_id}
+    )
+    await state.update_data(renders=renders)
 
 
-@dp.callback_query(F.data == "submit_last")
+@dp.callback_query(F.data.startswith("submit_last:"))
 async def submit_last(callback: CallbackQuery, state: FSMContext) -> None:
+    render_id = callback.data.split(":", 1)[1]
     data = await state.get_data()
-    rendered_file_id = data.get("last_rendered_file_id")
-    if not rendered_file_id:
+    entry = data.get("renders", {}).get(render_id)
+    if not entry:
         await callback.answer("не нашёл мем, кинь фото заново", show_alert=True)
         return
+    rendered_file_id = entry["rendered_file_id"]
 
     await callback.answer()
     try:
-        await callback.message.edit_reply_markup(reply_markup=try_again_kb(submitted=True))
+        await callback.message.edit_reply_markup(reply_markup=try_again_kb(render_id, submitted=True))
     except Exception:
         pass
 
@@ -565,17 +609,19 @@ async def submit_last(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-@dp.callback_query(F.data == "submit_custom")
+@dp.callback_query(F.data.startswith("submit_custom:"))
 async def submit_custom(callback: CallbackQuery, state: FSMContext) -> None:
+    render_id = callback.data.split(":", 1)[1]
     data = await state.get_data()
-    rendered_file_id = data.get("custom_rendered_file_id")
-    if not rendered_file_id:
+    entry = data.get("renders", {}).get(render_id)
+    if not entry:
         await callback.answer("не нашёл мем, загрузи заново", show_alert=True)
         return
+    rendered_file_id = entry["rendered_file_id"]
 
     await callback.answer()
     try:
-        await callback.message.edit_reply_markup(reply_markup=submit_this_kb(submitted=True))
+        await callback.message.edit_reply_markup(reply_markup=submit_this_kb(render_id, submitted=True))
     except Exception:
         pass
 
