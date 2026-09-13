@@ -34,8 +34,15 @@ MIN_WORDS = 2               # одно слово — обычно обрыво�
 MIN_CYRILLIC = 6            # меньше — обрывки вроде "чТо П0.12.0315"
 MIN_CYRILLIC_SHARE = 0.7    # доля кириллицы среди букв; ниже — английский или каша со скриншота
 MAX_LENGTH = 300            # длиннее — уже не подпись, а текст скриншота; в базе самая длинная ~190
+MIXED_SCRIPT_MIN_LETTERS = 4    # слово короче — совпадение латиницы/кириллицы может быть случайным
+IRREGULAR_CASE_MIN_LETTERS = 6  # слово короче — "Ты"/"ИЗ" не должны триггерить
 
 CYRILLIC = re.compile(r"[а-яёА-ЯЁіїєґўІЇЄҐЎ]")
+CYRILLIC_CHARS = set("абвгдеёжзийклмнопрстуфхцчшщъыьэюяіїєґўАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯІЇЄҐЎ")
+CYRILLIC_UPPER_CHARS = set("АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯІЇЄҐЎ")
+LATIN_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+GREEK = re.compile(r"[Α-Ωα-ω]")
+BANK_UI_MARKERS = ("перевод выполнен", "карта списания", "карта зачисления", "баланс", "отправить справку")
 
 
 def to_phrase(text: str) -> str:
@@ -43,6 +50,39 @@ def to_phrase(text: str) -> str:
     phrase = " ".join(text.split())        # строки мема через пробел, пробелы схлопнуты
     phrase = phrase.replace("|", "/")      # | у бота делит фразу на верх/низ
     return re.sub(r"^[#\s]+", "", phrase)  # строку с # в начале бот считает комментарием
+
+
+def _has_mixed_script_word(phrase: str) -> bool:
+    """Слово одновременно с кириллицей и латиницей (не только "похожие" буквы, а вперемешку) —
+    типичный сбой OCR: Ы/Ь распознаётся как латинские b/bI, вотермарки сайтов лезут в подпись."""
+    for word in phrase.split():
+        letters = [ch for ch in word if ch.isalpha()]
+        if len(letters) < MIXED_SCRIPT_MIN_LETTERS:
+            continue
+        if any(ch in CYRILLIC_CHARS for ch in letters) and any(ch in LATIN_CHARS for ch in letters):
+            return True
+    return False
+
+
+def _has_irregular_case_word(phrase: str) -> bool:
+    """Слово вроде "хУдОЖникоМ": регистр скачет внутри слова хаотично, а не как "Слово"/"СЛОВО" —
+    OCR-шум от стилизованного шрифта, а не осознанный "мокающий" стиль (тот бы держался всей фразы)."""
+    for word in phrase.split():
+        letters = [ch for ch in word if ch.isalpha()]
+        if len(letters) < IRREGULAR_CASE_MIN_LETTERS or not all(ch in CYRILLIC_CHARS for ch in letters):
+            continue
+        upper_flags = [ch in CYRILLIC_UPPER_CHARS for ch in letters]
+        # первую букву не считаем — "Слово" не должно триггерить
+        switches = sum(1 for a, b in zip(upper_flags[1:], upper_flags[2:]) if a != b)
+        if switches >= 2:
+            return True
+    return False
+
+
+def _is_bank_ui_screenshot(phrase: str) -> bool:
+    """Скриншот банковского приложения (перевод/баланс/карта), а не подпись к мему."""
+    low = phrase.lower()
+    return sum(1 for marker in BANK_UI_MARKERS if marker in low) >= 2
 
 
 def reject_reason(phrase: str):
@@ -57,6 +97,14 @@ def reject_reason(phrase: str):
         return f"кириллицы меньше {MIN_CYRILLIC_SHARE:.0%} букв"
     if len(phrase) > MAX_LENGTH:
         return f"длиннее {MAX_LENGTH} символов"
+    if GREEK.search(phrase):
+        return "греческие буквы (сбой OCR)"
+    if _is_bank_ui_screenshot(phrase):
+        return "скриншот банковского приложения, а не мем"
+    if _has_mixed_script_word(phrase):
+        return "кириллица вперемешку с латиницей внутри слова (сбой OCR)"
+    if _has_irregular_case_word(phrase):
+        return "хаотичный регистр внутри слова (сбой OCR)"
     return None
 
 
@@ -189,6 +237,59 @@ def cmd_import(jsonl: Path) -> None:
     print("блок заменён" if parts else "блок дописан в конец файла")
 
 
+def cmd_clean() -> None:
+    """
+    Повторно прогоняет уже лежащий в phrases.txt блок через reject_reason() —
+    для ретроактивной чистки после того как фильтр стал строже (например,
+    научился ловить вперемешку латиницу/кириллицу и хаотичный регистр внутри
+    слова — типичные сбои OCR, а не осознанные опечатки для юмора).
+    """
+    old_bytes = PHRASES_FILE.read_bytes()
+    text = old_bytes.decode("utf-8")
+    eol = "\r\n" if "\r\n" in text else "\n"
+    parts = split_block(text)
+    if not parts:
+        sys.exit(f"блока в {PHRASES_FILE.name} нет, нечего чистить")
+    before, block, after = parts
+
+    from itertools import takewhile
+    header = list(takewhile(lambda l: l.strip().startswith("#"), block.splitlines()))
+    phrases = bot_phrases(block)
+
+    kept, removed = [], []
+    for p in phrases:
+        reason = reject_reason(p)
+        (removed if reason else kept).append((reason, p) if reason else p)
+
+    print(f"фраз в блоке: {len(phrases)}")
+    if not removed:
+        print("чистить нечего, все фразы блока проходят текущий фильтр")
+        return
+
+    reasons = Counter(r for r, _ in removed)
+    print(f"будет удалено: {len(removed)} ({', '.join(f'{r}: {c}' for r, c in reasons.most_common())})")
+    print(f"останется: {len(kept)}")
+
+    BACKUP_DIR.mkdir(exist_ok=True)
+    report = BACKUP_DIR / f"ocr_removed.{datetime.now():%Y%m%d-%H%M%S-%f}.txt"
+    report.write_text(
+        "\n".join(f"[{reason}] {phrase}" for reason, phrase in removed) + "\n",
+        encoding="utf-8",
+    )
+    print(f"отчёт по удалённым фразам: {report}")
+
+    new_block = eol.join([
+        *header,
+        f"# Чистка (ocr_phrases.py clean, {date.today():%Y-%m-%d}): было {len(phrases)}, "
+        f"удалено {len(removed)}, осталось {len(kept)}. Отчёт: {report.name} в backups/.",
+        *kept,
+        END,
+    ])
+    new_text = before + new_block + block[len(block.rstrip("\r\n")):] + after
+    save(old_bytes, new_text)
+    print("блок почищен")
+
+
 def cmd_remove() -> None:
     old_bytes = PHRASES_FILE.read_bytes()
     text = old_bytes.decode("utf-8")
@@ -209,10 +310,13 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     p_import = sub.add_parser("import", help="записать блок из jsonl (существующий заменяется)")
     p_import.add_argument("jsonl", type=Path, help="jsonl из meme-ocr после finalize.py")
+    sub.add_parser("clean", help="повторно прогнать уже импортированный блок через фильтр reject_reason")
     sub.add_parser("remove", help="вырезать блок вместе с маркерами")
     args = parser.parse_args()
     if args.command == "import":
         cmd_import(args.jsonl)
+    elif args.command == "clean":
+        cmd_clean()
     else:
         cmd_remove()
 
