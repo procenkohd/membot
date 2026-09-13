@@ -125,6 +125,44 @@ def _draw_caption(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeType
         y += line_heights[i] + spacing
 
 
+LONG_PHRASE_CHARS = 50  # длиннее - одним блоком выглядит как стена мелкого текста в одном углу
+
+_SPLIT_CONJUNCTIONS = {
+    "а", "но", "и", "или", "если", "когда", "чтобы", "потому", "зато",
+    "либо", "хотя", "пока", "раз", "ведь", "что", "как", "чем",
+}
+
+
+def _split_phrase_for_layout(text: str) -> Optional[tuple]:
+    """Делит нераздельную фразу на верх/низ по словам: ищем точку, где
+    символьная длина половин наиболее сбалансирована (в русском слова
+    сильно разной длины, поровну слов не значит поровну текста), а если
+    рядом (±2 слова) есть союз/связка - режем перед ним, так читается
+    естественнее. None, если слов меньше 4 (резать особо нечего)."""
+    words = text.split()
+    if len(words) < 4:
+        return None
+
+    cum = [0]
+    for w in words:
+        cum.append(cum[-1] + len(w) + 1)
+    total = cum[-1] - 1
+
+    best_i, best_diff = 1, None
+    for i in range(1, len(words)):
+        left_len = cum[i] - 1
+        diff = abs(left_len - (total - left_len))
+        if best_diff is None or diff < best_diff:
+            best_diff, best_i = diff, i
+
+    for i in range(max(1, best_i - 2), min(len(words), best_i + 3)):
+        if words[i].lower().strip(",.!?…") in _SPLIT_CONJUNCTIONS:
+            best_i = i
+            break
+
+    return " ".join(words[:best_i]), " ".join(words[best_i:])
+
+
 def make_classic_meme(image_bytes: bytes, top_text: str, bottom_text: str,
                        font_choice: Optional[dict] = None) -> BytesIO:
     """Классический мем. font_choice можно передать явно (см.
@@ -137,24 +175,27 @@ def make_classic_meme(image_bytes: bytes, top_text: str, bottom_text: str,
         img = img.resize((int(img.width * ratio), int(img.height * ratio)))
 
     # --- визуальный рандом №1: расположение одноблочной фразы ---
-    # если фраза не разбита через | на верх/низ, у неё три равновероятных
-    # исхода вместо вечного "всегда внизу":
-    #   - остаётся одним блоком внизу
-    #   - переезжает одним блоком наверх
-    #   - режется примерно пополам по словам: половина наверх, половина вниз
+    # если фраза не разбита через | на верх/низ:
+    #   - длинная (LONG_PHRASE_CHARS+) всегда режется на верх/низ - одним
+    #     блоком она бы просто ужалась в мелкий текст в одном углу
+    #   - короткая - три равновероятных исхода для разнообразия:
+    #     остаётся внизу / переезжает одним блоком наверх / режется пополам
     if top_text and not bottom_text:
         top_text, bottom_text = "", top_text
 
     if bottom_text and not top_text:
-        roll = random.random()
-        if roll < 0.35:
-            top_text, bottom_text = bottom_text, ""
-        elif roll < 0.55:
-            words = bottom_text.split()
-            if len(words) >= 4:
-                mid = len(words) // 2
-                top_text = " ".join(words[:mid])
-                bottom_text = " ".join(words[mid:])
+        if len(bottom_text) >= LONG_PHRASE_CHARS:
+            split = _split_phrase_for_layout(bottom_text)
+            if split:
+                top_text, bottom_text = split
+        else:
+            roll = random.random()
+            if roll < 0.35:
+                top_text, bottom_text = bottom_text, ""
+            elif roll < 0.55:
+                split = _split_phrase_for_layout(bottom_text)
+                if split:
+                    top_text, bottom_text = split
 
     draw = ImageDraw.Draw(img)
 
