@@ -42,6 +42,17 @@ def get_submission(sub_id: str) -> Optional[dict]:
     return _load().get(sub_id)
 
 
+def has_pending(text: str) -> bool:
+    """Такая фраза уже ждёт модерации? Чтобы один и тот же текст из своих
+    мемов не копился в очереди по десять раз."""
+    key = " ".join(text.casefold().replace("ё", "е").split())
+    return any(
+        sub.get("status") == "pending"
+        and " ".join(sub.get("text", "").casefold().replace("ё", "е").split()) == key
+        for sub in _load().values()
+    )
+
+
 def set_status(sub_id: str, status: str) -> None:
     data = _load()
     if sub_id in data:

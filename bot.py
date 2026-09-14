@@ -20,6 +20,7 @@
 import asyncio
 import logging
 import os
+import re
 import uuid
 
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
@@ -37,7 +38,7 @@ from aiogram.types import (
     InlineKeyboardButton,
 )
 
-from phrasebank import get_random_phrase, parse_phrase, add_phrase
+from phrasebank import get_random_phrase, parse_phrase, add_phrase, load_phrases
 from memegen import make_meme, make_classic_meme, make_demotivator, FONT_CHOICES_BY_ID
 import stats
 import submission_queue
@@ -281,6 +282,31 @@ async def notify_admin_phrase_submission(bot: Bot, sub_id: str, text: str) -> No
         logger.exception("Failed to notify admin about phrase submission")
 
 
+def _phrase_key(text: str) -> str:
+    """Форма для сравнения фраз: регистр, ё/е, пунктуация и пробелы не различаются."""
+    s = text.casefold().replace("ё", "е")
+    return " ".join(re.sub(r"[\W_]+", " ", s).split())
+
+
+async def offer_custom_text_as_phrase(bot: Bot, text: str, chat_id: int) -> None:
+    """Текст, который человек придумал для своего мема, отправляем админу на
+    модерацию как кандидата в общую базу — база так пополняется живыми фразами
+    сама. Именно на модерацию, а не сразу в базу: иначе это та же дыра, из-за
+    которой кнопку «Добавить фразу» в своё время закрыли проверкой."""
+    if not ADMIN_ID or not text:
+        return
+    key = _phrase_key(text)
+    if not key or phrase_queue.has_pending(text):
+        return
+    if any(_phrase_key(p) == key for p in load_phrases()):
+        return
+    try:
+        sub_id = phrase_queue.add_submission(text, chat_id)
+        await notify_admin_phrase_submission(bot, sub_id, f"(из своего мема) {text}")
+    except Exception:
+        logger.exception("Failed to queue custom meme text as phrase")
+
+
 class MemeStates(StatesGroup):
     waiting_phrase = State()          # ждём текст новой фразы для базы
     waiting_custom_photo = State()    # ждём фото для своего мема
@@ -495,6 +521,8 @@ async def custom_meme_got_text(message: Message, state: FSMContext, bot: Bot) ->
     )
     renders = remember_render(data, render_id, {"rendered_file_id": sent.photo[-1].file_id})
     await state.update_data(renders=renders)
+
+    await offer_custom_text_as_phrase(bot, message.text.strip(), message.chat.id)
 
 
 # ---------- обычный режим: просто прислали фото -> случайный мем ----------
