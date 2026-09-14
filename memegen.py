@@ -134,13 +134,26 @@ _SPLIT_CONJUNCTIONS = {
     "репост", "лайк", "шер", "дизлайк", "донат", "подписка", "плюс", "минус",
 }
 
+# предлоги и частицы, на которых нельзя обрывать верхнюю строку - иначе "в"
+# повисает без своего дополнения ("я прибыл в|своём времени" читается коряво)
+_NO_DANGLE_AT_END = {
+    "в", "во", "на", "с", "со", "к", "ко", "у", "о", "об", "от", "до", "из",
+    "по", "под", "над", "за", "при", "для", "без", "про", "через", "между",
+    "перед", "не", "ни", "же", "бы", "ль", "и", "а", "но", "что", "как", "то",
+}
+
 
 def _split_phrase_for_layout(text: str) -> Optional[tuple]:
-    """Делит нераздельную фразу на верх/низ по словам: ищем точку, где
-    символьная длина половин наиболее сбалансирована (в русском слова
-    сильно разной длины, поровну слов не значит поровну текста), а если
-    рядом (±2 слова) есть союз/связка - режем перед ним, так читается
-    естественнее. None, если слов меньше 4 (резать особо нечего)."""
+    """Делит нераздельную фразу на верх/низ по словам.
+    Приоритеты (по убыванию надёжности):
+    1. запятая рядом с серединой - в русском это почти всегда граница
+       смысловых частей ("это не X, это Y"), самый надёжный маркер;
+    2. иначе - точка, где символьная длина половин наиболее сбалансирована
+       (поровну слов не значит поровну текста - слова разной длины), с
+       поправкой на ближайший союз/связку, если он рядом (±2 слова);
+    3. в любом случае не даём верхней строке оборваться на предлоге/частице
+       без своего дополнения - сдвигаем точку разреза на следующее слово.
+    None, если слов меньше 4 (резать особо нечего)."""
     words = text.split()
     if len(words) < 4:
         return None
@@ -150,17 +163,27 @@ def _split_phrase_for_layout(text: str) -> Optional[tuple]:
         cum.append(cum[-1] + len(w) + 1)
     total = cum[-1] - 1
 
-    best_i, best_diff = 1, None
-    for i in range(1, len(words)):
+    def diff_at(i: int) -> int:
         left_len = cum[i] - 1
-        diff = abs(left_len - (total - left_len))
-        if best_diff is None or diff < best_diff:
-            best_diff, best_i = diff, i
+        return abs(left_len - (total - left_len))
 
-    for i in range(max(1, best_i - 2), min(len(words), best_i + 3)):
-        if words[i].lower().strip(",.!?…") in _SPLIT_CONJUNCTIONS:
-            best_i = i
+    comma_positions = [i for i in range(1, len(words)) if words[i - 1].endswith(",")]
+    if comma_positions:
+        best_i = min(comma_positions, key=diff_at)
+    else:
+        best_i = min(range(1, len(words)), key=diff_at)
+        for i in range(max(1, best_i - 2), min(len(words), best_i + 3)):
+            if words[i].lower().strip(",.!?…") in _SPLIT_CONJUNCTIONS:
+                best_i = i
+                break
+
+    for _ in range(3):
+        if best_i >= len(words) - 1:
             break
+        last_word = words[best_i - 1].lower().strip(",.!?…")
+        if last_word not in _NO_DANGLE_AT_END:
+            break
+        best_i += 1
 
     return " ".join(words[:best_i]), " ".join(words[best_i:])
 
