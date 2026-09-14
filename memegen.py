@@ -333,11 +333,21 @@ def make_demotivator(image_bytes: bytes, caption: str, subtitle: str = "") -> By
     return buf
 
 
+VERY_LONG_UNSPLIT_CHARS = 110  # длиннее и без | - разрежь как угодно, на классике всё равно "стена текста"
+
+
 def make_meme(image_bytes: bytes, top_text: str, bottom_text: str) -> BytesIO:
     """Точка входа, которой пользуется бот. Сама рандомно решает, какой
     стиль выдать — классический мем или демотиватор — так что вызывающему
     коду (bot.py) вообще ничего менять не нужно."""
-    if random.random() < DEMOTIVATOR_CHANCE:
+    # длинная нераздельная фраза - это цельная мысль без чёткой формы
+    # "завязка/панчлайн", у классического мема (верх/низ, ужатый в 32%
+    # высоты фото) под такое просто нет подходящей формы. Демотиватор для
+    # длинных ироничных подписей жанрово как раз создан - подпись под
+    # фото, без жёсткого лимита высоты.
+    force_demotivator = bottom_text and not top_text and len(bottom_text) >= VERY_LONG_UNSPLIT_CHARS
+
+    if force_demotivator or random.random() < DEMOTIVATOR_CHANCE:
         if top_text and bottom_text:
             caption, subtitle = top_text, bottom_text
         else:
