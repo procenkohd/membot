@@ -15,9 +15,10 @@ FONTS_DIR = Path(__file__).parent / "fonts"
 
 # Настоящий Impact не поддерживает кириллицу, поэтому для классического
 # мема есть выбор из шрифтов с кириллицей — три жирных капса (Oswald,
-# Roboto Condensed, Rubik) и рукописный Pacifico — какой выпадет, решает
-# рандом (если не выбран явно, см. font_id в make_classic_meme). Marck
-# Script убрали: с обводкой был нечитаемым.
+# Roboto Condensed, Rubik), какой выпадет, решает рандом (если не выбран
+# явно, см. font_id в make_classic_meme). Рукописные отсюда выпилены:
+# сначала Marck Script, потом Pacifico — капс с обводкой у них слипается
+# в нечитаемую кашу, а текст в базе сплошь капсом.
 FONT_CHOICES_BY_ID = {
     "oswald": {"path": FONTS_DIR / "Oswald-Variable.ttf", "weight": 700, "upper": True, "label": "Oswald (капс)"},
     "roboto_condensed": {
@@ -25,10 +26,6 @@ FONT_CHOICES_BY_ID = {
         "label": "Roboto Condensed (капс)",
     },
     "rubik": {"path": FONTS_DIR / "Rubik-Variable.ttf", "weight": 800, "upper": True, "label": "Rubik (капс)"},
-    "pacifico": {
-        "path": FONTS_DIR / "Pacifico-Regular.ttf", "weight": None, "upper": False,
-        "label": "Pacifico (рукописный)",
-    },
 }
 
 FONT_CHOICES = list(FONT_CHOICES_BY_ID.values())
@@ -334,18 +331,28 @@ def make_demotivator(image_bytes: bytes, caption: str, subtitle: str = "") -> By
 
 
 VERY_LONG_UNSPLIT_CHARS = 110  # длиннее и без | - разрежь как угодно, на классике всё равно "стена текста"
+DEMOTIVATOR_ONLY_PREFIX = "~"  # "~фраза" в phrases.txt = у фразы нет формы верх/низ, только демотиватор
 
 
 def make_meme(image_bytes: bytes, top_text: str, bottom_text: str) -> BytesIO:
     """Точка входа, которой пользуется бот. Сама рандомно решает, какой
     стиль выдать — классический мем или демотиватор — так что вызывающему
     коду (bot.py) вообще ничего менять не нужно."""
+    # ~ в начале фразы - явная пометка "эту резать на верх/низ бессмысленно"
+    forced_by_marker = False
+    if top_text.startswith(DEMOTIVATOR_ONLY_PREFIX):
+        top_text, forced_by_marker = top_text[1:].lstrip(), True
+    elif bottom_text.startswith(DEMOTIVATOR_ONLY_PREFIX):
+        bottom_text, forced_by_marker = bottom_text[1:].lstrip(), True
+
     # длинная нераздельная фраза - это цельная мысль без чёткой формы
     # "завязка/панчлайн", у классического мема (верх/низ, ужатый в 32%
     # высоты фото) под такое просто нет подходящей формы. Демотиватор для
     # длинных ироничных подписей жанрово как раз создан - подпись под
     # фото, без жёсткого лимита высоты.
-    force_demotivator = bottom_text and not top_text and len(bottom_text) >= VERY_LONG_UNSPLIT_CHARS
+    force_demotivator = forced_by_marker or (
+        bottom_text and not top_text and len(bottom_text) >= VERY_LONG_UNSPLIT_CHARS
+    )
 
     if force_demotivator or random.random() < DEMOTIVATOR_CHANCE:
         if top_text and bottom_text:
