@@ -1270,32 +1270,20 @@ def _blocks(messages: Sequence, th: Theme) -> list:
     return out
 
 
-def split_pages(messages: Sequence, *, theme: str = "ios_dark",
-                pinned: Optional[str] = None) -> list:
-    """Режет переписку на экраны так, как её отскриншотил бы человек: набиваем
-    сообщения, пока влезают, дальше начинаем следующий скрин. Одно сообщение
-    выше экрана остаётся на своём экране целиком — обрезать его по живому
-    хуже, чем дать ему вылезти."""
-    th = THEMES.get(theme, THEMES["ios_dark"])
-    top, bottom = _area(th, pinned)
-    avail = bottom - top
-    pages, cur, cur_h = [], [], 0
-    for m, (date_h, gap, h, _) in zip(messages, _blocks(messages, th)):
-        need = date_h + h + (gap if cur else 0)
-        if cur and cur_h + need > avail:
-            pages.append(cur)
-            cur, cur_h = [m], date_h + h
-        else:
-            cur.append(m)
-            cur_h += need
-    if cur:
-        pages.append(cur)
-    return pages
+def content_height(messages: Sequence, th: Theme) -> int:
+    """Полная высота переписки, как её посчитает отрисовщик."""
+    return sum(d + g + h for d, g, h, _ in _blocks(messages, th))
 
 
 def page_count(messages: Sequence, *, theme: str = "ios_dark",
-               pinned: Optional[str] = None) -> int:
-    return max(1, len(split_pages(messages, theme=theme, pinned=pinned)))
+               pinned: Optional[str] = None, max_pages: int = 10) -> int:
+    th = THEMES.get(theme, THEMES["ios_dark"])
+    top, bottom = _area(th, pinned)
+    avail = bottom - top
+    total = content_height(messages, th)
+    if total <= avail:
+        return 1
+    return min(max_pages, math.ceil(total / avail))
 
 
 # ---------- публичная функция ----------
@@ -1308,6 +1296,7 @@ def make_chat_screenshot(messages: Sequence[Msg], *, theme: str = "ios_dark",
                          pinned: Optional[str] = None,
                          clock: str = "13:17",
                          align: str = "bottom",
+                         scroll: int = 0,
                          up_to: Optional[int] = None) -> BytesIO:
     """Собирает скриншот чата. up_to ограничивает число показанных сообщений —
     через него потом делается видео: кадр на каждое новое сообщение."""
@@ -1336,13 +1325,14 @@ def make_chat_screenshot(messages: Sequence[Msg], *, theme: str = "ios_dark",
             total += PX(GAP_SAME if msgs[i - 1].out == m.out else GAP_DIFF)
         total += mm["h"]
 
-    # последний экран прижат к низу (там конец переписки), промежуточные
-    # заполняются сверху — иначе в середине скролла оставалась бы пустота
+    # scroll — на сколько пикселей «прокручено» вверх от конца переписки.
+    # Ноль значит низ чата, максимум — самое начало.
     if align == "top":
         y = area_top
+    elif total < (area_bottom - area_top):
+        y = max(area_top, area_bottom - total)
     else:
-        y = max(area_top, area_bottom - total) if total < (area_bottom - area_top) \
-            else area_bottom - total
+        y = area_bottom - total + scroll
 
     for i, (m, mm) in enumerate(zip(msgs, metrics)):
         if m.date:
@@ -1371,13 +1361,25 @@ def make_chat_screenshot(messages: Sequence[Msg], *, theme: str = "ios_dark",
 
 
 def make_chat_pages(messages: Sequence, *, max_pages: int = 10, **kwargs) -> list:
-    """Вся переписка как список готовых скринов. Порядок — от начала к концу."""
-    theme = kwargs.get("theme", "ios_dark")
-    pinned = kwargs.get("pinned")
-    pages = split_pages(messages, theme=theme, pinned=pinned) or [[]]
-    pages = pages[:max_pages]
-    out = []
-    for i, page in enumerate(pages):
-        out.append(make_chat_screenshot(
-            page, align="bottom" if i == len(pages) - 1 else "top", **kwargs))
-    return out
+    """Переписка как несколько скринов, от начала к концу.
+
+    Не режем на куски, а ставим несколько окон во весь экран, равномерно
+    разнесённых по всей высоте: первое упирается в начало переписки, последнее
+    в конец. Так каждый скрин заполнен целиком, а нахлёст между соседними
+    ровный и небольшой — как у человека, который листает примерно равными
+    шагами. Нарезка кусками давала либо пустую стену на коротком экране, либо
+    половину сообщений продублированной.
+    """
+    th = THEMES.get(kwargs.get("theme", "ios_dark"), THEMES["ios_dark"])
+    top, bottom = _area(th, kwargs.get("pinned"))
+    avail = bottom - top
+    total = content_height(messages, th)
+    msgs = list(messages)
+
+    if total <= avail:
+        return [make_chat_screenshot(msgs, **kwargs)]
+
+    n = min(max_pages, math.ceil(total / avail))
+    step = (total - avail) / (n - 1) if n > 1 else 0
+    return [make_chat_screenshot(msgs, scroll=int((n - 1 - k) * step), **kwargs)
+            for k in range(n)]
