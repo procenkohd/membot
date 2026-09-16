@@ -21,6 +21,8 @@ from typing import Optional, Sequence
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
+import storage
+
 BASE_DIR = Path(__file__).parent
 FONTS_DIR = BASE_DIR / "fonts"
 
@@ -73,10 +75,73 @@ def _emoji_font() -> Optional[ImageFont.FreeTypeFont]:
     return _EMOJI_FONT
 
 
+# Битмап в шрифте всего 136x128, поэтому крупные эмодзи (стикер, реакция на
+# кружке) из него растягиваются в мыло. Для таких берём PNG 512x512 из набора
+# noto-emoji: один раз скачали, дальше лежит в кэше рядом с остальным состоянием.
+EMOJI_PNG_URL = "https://raw.githubusercontent.com/googlefonts/noto-emoji/main/png/512/{}.png"
+EMOJI_PNG_MIN = 110          # ниже этого размера шрифт и так резкий
+_EMOJI_PNG_MISS: set = set()
+
+
+def _emoji_png_names(ch: str) -> list:
+    """Имена файлов в noto-emoji: emoji_u<коды через _>. Селектор fe0f там
+    обычно опущен, поэтому пробуем оба варианта, а затем без модификаторов."""
+    cps = [ord(c) for c in ch]
+    variants = [
+        [c for c in cps if c != 0xFE0F],
+        cps,
+        [c for c in cps if c not in (0xFE0F, 0x200D) and not 0x1F3FB <= c <= 0x1F3FF],
+    ]
+    names, seen = [], set()
+    for v in variants:
+        if not v:
+            continue
+        name = "emoji_u" + "_".join(f"{c:x}" for c in v)
+        if name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def _emoji_png(ch: str) -> Optional[Image.Image]:
+    cache_dir = storage.data_path("emoji_cache")
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
+    for name in _emoji_png_names(ch):
+        if name in _EMOJI_PNG_MISS:
+            continue
+        path = Path(cache_dir) / f"{name}.png"
+        if path.exists():
+            try:
+                return Image.open(path).convert("RGBA")
+            except Exception:
+                path.unlink(missing_ok=True)
+        try:
+            import urllib.request
+            with urllib.request.urlopen(EMOJI_PNG_URL.format(name), timeout=6) as r:
+                data = r.read()
+            path.write_bytes(data)
+            return Image.open(path).convert("RGBA")
+        except Exception:
+            _EMOJI_PNG_MISS.add(name)
+    return None
+
+
 def render_emoji(ch: str, px: int) -> Optional[Image.Image]:
     key = (ch, px)
     if key in _EMOJI_CACHE:
         return _EMOJI_CACHE[key]
+    if px >= EMOJI_PNG_MIN:
+        hi = _emoji_png(ch)
+        if hi is not None:
+            bb = hi.getbbox()          # в PNG свои поля, режем по содержимому,
+            if bb:                     # иначе эмодзи выходит мельче шрифтового
+                hi = hi.crop(bb)
+            side = max(hi.size)
+            sq = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+            sq.paste(hi, ((side - hi.width) // 2, (side - hi.height) // 2), hi)
+            out = sq.resize((px, px), Image.LANCZOS)
+            _EMOJI_CACHE[key] = out
+            return out
     f = _emoji_font()
     if f is None:
         return None
@@ -475,7 +540,8 @@ def _measure(msg: Msg, th: Theme) -> dict:
                     time_inline=False, time_w=0, photo_h=0, photo_w=0, inset=0,
                     emoji_px=PX(th.font_pt * 1.15))
     if msg.kind == "sticker":
-        return dict(kind=msg.kind, lines=[], line_h=0, w=PX(STICKER_D), h=PX(STICKER_D),
+        return dict(kind=msg.kind, lines=[], line_h=0, w=PX(STICKER_D),
+                    h=PX(STICKER_D) + PX(24),
                     time_inline=False, time_w=0, photo_h=0, photo_w=0, inset=0,
                     emoji_px=PX(th.font_pt * 1.15))
     if msg.kind == "voice":
@@ -665,9 +731,10 @@ def _draw_bare(canvas: Image.Image, msg: Msg, th: Theme, m: dict, x: int, y: int
         if em is not None:
             layer.alpha_composite(em, (0, 0))
         tw = int(ft.getlength(msg.time))
-        d.rounded_rectangle((D - tw - PX(18), D - PX(26), D + PX(4), D - PX(4)),
+        # время у стикера стоит ПОД ним, иначе налезает на картинку
+        d.rounded_rectangle((D - tw - PX(18), D + PX(2), D, D + PX(24)),
                             radius=PX(11), fill=(0, 0, 0, 105))
-        d.text((D - tw - PX(10), D - PX(23)), msg.time, font=ft, fill=(255, 255, 255, 235))
+        d.text((D - tw - PX(9), D + PX(5)), msg.time, font=ft, fill=(255, 255, 255, 235))
 
     canvas.alpha_composite(layer, (x, y))
 

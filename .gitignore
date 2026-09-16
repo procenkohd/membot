@@ -11,3 +11,4 @@ data/
 .playwright-mcp/
 backups/
 ref/
+emoji_cache/
