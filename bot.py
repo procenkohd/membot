@@ -42,6 +42,7 @@ from phrasebank import get_random_phrase, parse_phrase, add_phrase, load_phrases
 from memegen import make_meme, make_classic_meme, make_demotivator, FONT_CHOICES_BY_ID
 import stats
 import submission_queue
+import chatflow
 import phrase_queue
 
 logging.basicConfig(level=logging.INFO)
@@ -121,6 +122,7 @@ dp.callback_query.middleware(SubscriptionGateMiddleware())
 
 BTN_ADD_PHRASE = "✍️ Добавить фразу"
 BTN_CUSTOM_MEME = "🖼 Свой мем"
+BTN_CHAT = chatflow.BTN_CHAT
 BTN_SUBMIT = "📮 Предложить в канал"
 BTN_HELP = "❓ Помощь"
 BTN_CANCEL = "✖️ Отмена"
@@ -129,6 +131,7 @@ BTN_TRY_AGAIN = "🔁 Попробуй ещё"
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text=BTN_ADD_PHRASE), KeyboardButton(text=BTN_CUSTOM_MEME)],
+        [KeyboardButton(text=BTN_CHAT)],
         [KeyboardButton(text=BTN_SUBMIT)],
         [KeyboardButton(text=BTN_HELP)],
     ],
@@ -331,6 +334,9 @@ def build_help_text() -> str:
         f"{BTN_ADD_PHRASE} — добавить свою фразу в общую базу\n"
         f"{BTN_CUSTOM_MEME} — загрузить своё фото и самому написать для него текст "
         "(это не рандомный мем — надпись придумываешь ты)\n"
+        f"{BTN_CHAT} — собрать скриншот переписки: имена, аватарки, реплики, "
+        "голосовые, кружки, стикеры. бот ведёт по шагам, ничего писать "
+        "спецсимволами не надо\n"
         f"{BTN_SUBMIT} — предложить мем в канал (после ручной проверки)\n\n"
         "команды (для тех кто любит текстом):\n"
         "/add текст — то же самое что кнопка, но одним сообщением\n"
@@ -896,6 +902,7 @@ async def main() -> None:
     if not BOT_TOKEN:
         raise SystemExit("Не задан BOT_TOKEN. Сделай: export BOT_TOKEN='твой_токен_от_BotFather'")
 
+    dp.include_router(chatflow.router)
     bot = Bot(token=BOT_TOKEN)
     await dp.start_polling(bot)
 

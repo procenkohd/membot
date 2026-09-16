@@ -616,7 +616,8 @@ def _measure(msg: Msg, th: Theme) -> dict:
                     emoji_px=PX(th.font_pt * 1.15))
     if msg.kind == "voice":
         w = PX(290 + min(1.0, _dur_seconds(msg.duration) / 60) * 38)
-        return dict(kind=msg.kind, lines=[], line_h=0, w=int(w), h=PX(VOICE_H),
+        return dict(kind=msg.kind, lines=[], line_h=0, w=int(w),
+                    h=PX(VOICE_H) + (PX(REACT_H + 4) if msg.reaction else 0),
                     time_inline=False, time_w=0, photo_h=0, photo_w=0, inset=0,
                     emoji_px=PX(th.font_pt * 1.15))
     if msg.kind in ("file", "call"):
@@ -624,7 +625,8 @@ def _measure(msg: Msg, th: Theme) -> dict:
                                                        else "Входящий звонок"))
         w = int(min(max_bubble_w, PX(VOICE_PLAY_D + 34) + fw + PX(24)))
         return dict(kind=msg.kind, lines=[], line_h=0, w=w,
-                    h=PX(FILE_H if msg.kind == "file" else CALL_H),
+                    h=PX(FILE_H if msg.kind == "file" else CALL_H)
+                      + (PX(REACT_H + 4) if msg.reaction else 0),
                     time_inline=False, time_w=0, photo_h=0, photo_w=0, inset=0,
                     emoji_px=PX(th.font_pt * 1.15))
 
@@ -724,12 +726,38 @@ def _transcribe_btn(d: ImageDraw.ImageDraw, x: int, y: int, accent) -> None:
     d.text((x + PX(23), y + PX(8)), "A", font=font(14, 600), fill=accent)
 
 
+def _reaction_chip(layer: Image.Image, d: ImageDraw.ImageDraw, msg: Msg, th: Theme,
+                   x: int, y: int, text_color) -> int:
+    """Чип реакции: эмодзи и либо аватарка автора, либо счётчик. Возвращает ширину."""
+    ew = PX(REACT_H * 0.66)
+    solo = msg.reaction_count <= 1
+    tail_w = ew if solo else int(font(14, 600).getlength(str(msg.reaction_count)))
+    cw = PX(9) + ew + PX(5) + tail_w + PX(9)
+    d.rounded_rectangle((x, y, x + cw, y + PX(REACT_H)), radius=PX(REACT_H / 2),
+                        fill=(255, 255, 255, 45) if msg.out else th.header_accent[:3] + (80,))
+    em = render_emoji(msg.reaction, int(ew))
+    if em is not None:
+        layer.alpha_composite(em, (x + PX(9), int(y + (PX(REACT_H) - ew) / 2)))
+    if solo:
+        av = (_avatar(int(ew), msg.reactor, msg.reactor_photo)
+              if (msg.reactor or msg.reactor_photo) else _blank_avatar(int(ew)))
+        layer.alpha_composite(av, (x + PX(9) + int(ew) + PX(5), int(y + (PX(REACT_H) - ew) / 2)))
+    else:
+        d.text((x + PX(9) + ew + PX(5), y + PX(5)), str(msg.reaction_count),
+               font=font(14, 600), fill=text_color)
+    return cw
+
+
 def _draw_media_row(layer, d, msg: Msg, th: Theme, m: dict, text_color, time_color, ft) -> None:
     w, h = m["w"], m["h"]
     accent = (255, 255, 255, 255) if msg.out else th.header_accent
     circle_bg = (255, 255, 255, 235) if msg.out else (105, 180, 234, 255)
     glyph_color = th.bubble_out[:3] + (255,) if msg.out else (255, 255, 255, 255)
-    cx, cy = PX(11) + PX(VOICE_PLAY_D) // 2, h // 2 if m["kind"] != "voice" else PX(33)
+    # иконку центрируем по содержимому, а не по всему пузырю: с реакцией он
+    # выше, и круг уезжал вниз, налезая на чип
+    content_h = h - (PX(REACT_H + 4) if msg.reaction else 0)
+    cx = PX(11) + PX(VOICE_PLAY_D) // 2
+    cy = PX(33) if m["kind"] == "voice" else content_h // 2
 
     if m["kind"] == "voice":
         _play_circle(layer, d, cx, cy, PX(VOICE_PLAY_D), circle_bg, glyph_color, "play")
@@ -758,6 +786,9 @@ def _draw_media_row(layer, d, msg: Msg, th: Theme, m: dict, text_color, time_col
         d.text((PX(WAVE_X + 11), PX(12)), title, font=font(16, 600), fill=text_color)
         d.text((PX(WAVE_X + 11), PX(34)), msg.duration or "не отвечено",
                font=font(14), fill=time_color)
+
+    if msg.reaction:
+        _reaction_chip(layer, d, msg, th, PX(PAD_X), h - PX(REACT_H) - PX(6), text_color)
 
     tw = int(ft.getlength(msg.time))
     tx = w - PX(PAD_X) - tw - (PX(TICK_W) if msg.out else 0)
@@ -890,24 +921,7 @@ def _draw_bubble(canvas: Image.Image, msg: Msg, th: Theme, m: dict,
         cy += m["line_h"]
 
     if msg.reaction:
-        ew = PX(REACT_H * 0.66)
-        solo = msg.reaction_count <= 1
-        tail_w = ew if solo else int(font(14, 600).getlength(str(msg.reaction_count)))
-        cw = PX(9) + ew + PX(5) + tail_w + PX(9)
-        d.rounded_rectangle((PX(PAD_X), cy, PX(PAD_X) + cw, cy + PX(REACT_H)),
-                            radius=PX(REACT_H / 2),
-                            fill=(255, 255, 255, 45) if msg.out else th.header_accent[:3] + (80,))
-        em = render_emoji(msg.reaction, int(ew))
-        if em is not None:
-            layer.alpha_composite(em, (PX(PAD_X) + PX(9), int(cy + (PX(REACT_H) - ew) / 2)))
-        if solo:
-            av = (_avatar(int(ew), msg.reactor, msg.reactor_photo)
-                  if (msg.reactor or msg.reactor_photo) else _blank_avatar(int(ew)))
-            layer.alpha_composite(av, (PX(PAD_X) + PX(9) + ew + PX(5),
-                                       int(cy + (PX(REACT_H) - ew) / 2)))
-        else:
-            d.text((PX(PAD_X) + PX(9) + ew + PX(5), cy + PX(5)), str(msg.reaction_count),
-                   font=font(14, 600), fill=text_color)
+        _reaction_chip(layer, d, msg, th, PX(PAD_X), cy, text_color)
         cy += PX(REACT_H) + PX(5)
 
     # время: либо в хвосте последней строки, либо отдельной строкой справа
