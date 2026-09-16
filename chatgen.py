@@ -380,6 +380,12 @@ class Msg:
     forwarded_from: Optional[str] = None     # «Переслано от ...»
     forwarded_photo: Optional[Image.Image] = None
     views: Optional[int] = None       # счётчик просмотров рядом со временем
+    kind: str = "text"                # text | voice | videonote | file | call | sticker
+    duration: str = ""                # «0:57» для голосового и кружка
+    file_name: str = ""
+    file_size: str = ""
+    call_missed: bool = False
+    sticker: str = ""                 # эмодзи, если kind == "sticker"
 
 
 # Метрики в пойнтах. Взяты из макета iOS-телеграма.
@@ -395,6 +401,14 @@ TIME_PT = 11.2
 TIME_GAP = 8.2
 TICK_W = 11
 PHOTO_MAX = 250
+# голосовое: пузырь 70pt, кружок play 44pt, волна из палок 2.3pt с зазором 2.1pt
+VOICE_H = 70
+VOICE_PLAY_D = 44
+WAVE_X = 54
+WAVE_BAR, WAVE_GAP, WAVE_MAX_H = 2.3, 2.1, 22
+VNOTE_D = 230
+STICKER_D = 140
+FILE_H, CALL_H = 70, 58
 REPLY_H = 40
 REACT_H = 30
 FWD_H = 41
@@ -412,6 +426,27 @@ def _tick(d: ImageDraw.ImageDraw, x: int, y: int, color, double: bool) -> None:
         one(x + PX(4.2))
 
 
+def _dur_seconds(text: str) -> int:
+    try:
+        m, sec = text.split(":")
+        return int(m) * 60 + int(sec)
+    except Exception:
+        return 30
+
+
+def _wave_heights(seed: str, n: int) -> list:
+    """Форма волны у голосового — псевдослучайная, но стабильная для одного
+    сообщения: иначе при перерисовке картинка «дёргалась» бы."""
+    rnd = random.Random(seed)
+    out = []
+    for i in range(n):
+        # две синусоиды разной частоты дают «речевой» рисунок с паузами,
+        # чистый рандом выглядит как ровная щётка
+        env = 0.45 + 0.55 * abs(math.sin(i / 7.3)) * abs(math.cos(i / 17.1 + 0.7))
+        out.append(max(0.07, min(1.0, env * rnd.uniform(0.25, 1.25))))
+    return out
+
+
 def _measure(msg: Msg, th: Theme) -> dict:
     f = font(th.font_pt)
     ft = font(TIME_PT, 500)
@@ -420,6 +455,30 @@ def _measure(msg: Msg, th: Theme) -> dict:
     line_h = PX(th.font_pt * 1.307)
 
     max_bubble_w = PX(SCREEN_W_PT * th.max_bubble)
+
+    if msg.kind == "videonote":
+        extra = PX(REACT_H + 6) if msg.reaction else 0
+        return dict(kind=msg.kind, lines=[], line_h=0, w=PX(VNOTE_D), h=PX(VNOTE_D) + extra,
+                    time_inline=False, time_w=0, photo_h=0, photo_w=0, inset=0,
+                    emoji_px=PX(th.font_pt * 1.15))
+    if msg.kind == "sticker":
+        return dict(kind=msg.kind, lines=[], line_h=0, w=PX(STICKER_D), h=PX(STICKER_D),
+                    time_inline=False, time_w=0, photo_h=0, photo_w=0, inset=0,
+                    emoji_px=PX(th.font_pt * 1.15))
+    if msg.kind == "voice":
+        w = PX(290 + min(1.0, _dur_seconds(msg.duration) / 60) * 38)
+        return dict(kind=msg.kind, lines=[], line_h=0, w=int(w), h=PX(VOICE_H),
+                    time_inline=False, time_w=0, photo_h=0, photo_w=0, inset=0,
+                    emoji_px=PX(th.font_pt * 1.15))
+    if msg.kind in ("file", "call"):
+        fw = font(16, 600).getlength(msg.file_name or ("Пропущенный звонок" if msg.call_missed
+                                                       else "Входящий звонок"))
+        w = int(min(max_bubble_w, PX(VOICE_PLAY_D + 34) + fw + PX(24)))
+        return dict(kind=msg.kind, lines=[], line_h=0, w=w,
+                    h=PX(FILE_H if msg.kind == "file" else CALL_H),
+                    time_inline=False, time_w=0, photo_h=0, photo_w=0, inset=0,
+                    emoji_px=PX(th.font_pt * 1.15))
+
     lines = wrap_text(msg.text, f, max_text_w, emoji_px) if msg.text.strip() else []
     views_w = (PX(19) + int(ft.getlength(str(msg.views)))) if msg.views is not None else 0
     time_w = int(ft.getlength(msg.time)) + (PX(TICK_W) if msg.out else 0) + views_w
@@ -483,9 +542,139 @@ def _measure(msg: Msg, th: Theme) -> dict:
     else:
         bubble_h = h + PX(PAD_Y) * 2
 
-    return dict(lines=lines, line_h=line_h, w=int(bubble_w), h=int(bubble_h),
+    return dict(kind=msg.kind, lines=lines, line_h=line_h, w=int(bubble_w), h=int(bubble_h),
                 time_inline=time_inline, time_w=time_w, photo_h=photo_h, inset=inset,
                 photo_w=photo_w, emoji_px=emoji_px)
+
+
+def _play_circle(layer: Image.Image, d: ImageDraw.ImageDraw, cx: int, cy: int,
+                 diam: int, bg, glyph, kind: str) -> None:
+    r = diam // 2
+    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=bg)
+    if kind == "play":
+        t = diam * 0.28
+        d.polygon([(cx - t * 0.6, cy - t), (cx - t * 0.6, cy + t), (cx + t, cy)], fill=glyph)
+    elif kind == "doc":
+        w_, h_ = diam * 0.26, diam * 0.34
+        d.rounded_rectangle((cx - w_, cy - h_, cx + w_, cy + h_), radius=PX(2), fill=glyph)
+        d.polygon([(cx + w_ - PX(7), cy - h_), (cx + w_, cy - h_ + PX(7)),
+                   (cx + w_ - PX(7), cy - h_ + PX(7))], fill=bg)
+    else:  # телефонная трубка
+        tile = Image.new("RGBA", (PX(40), PX(40)), (0, 0, 0, 0))
+        td = ImageDraw.Draw(tile)
+        td.rounded_rectangle((PX(5), PX(6), PX(15), PX(17)), radius=PX(4), fill=glyph)
+        td.rounded_rectangle((PX(25), PX(23), PX(35), PX(34)), radius=PX(4), fill=glyph)
+        td.line((PX(11), PX(13), PX(29), PX(28)), fill=glyph, width=PX(5))
+        layer.alpha_composite(tile.rotate(45, resample=Image.BICUBIC),
+                              (int(cx - PX(20)), int(cy - PX(20))))
+
+
+def _transcribe_btn(d: ImageDraw.ImageDraw, x: int, y: int, accent) -> None:
+    """Кнопка «расшифровать в текст» — стрелка и буква A в скруглённом поле."""
+    d.rounded_rectangle((x, y, x + PX(40), y + PX(34)), radius=PX(9),
+                        fill=(255, 255, 255, 30))
+    d.line((x + PX(9), y + PX(17), x + PX(18), y + PX(17)), fill=accent, width=PX(2))
+    d.polygon([(x + PX(18), y + PX(13)), (x + PX(22), y + PX(17)), (x + PX(18), y + PX(21))],
+              fill=accent)
+    d.text((x + PX(23), y + PX(8)), "A", font=font(14, 600), fill=accent)
+
+
+def _draw_media_row(layer, d, msg: Msg, th: Theme, m: dict, text_color, time_color, ft) -> None:
+    w, h = m["w"], m["h"]
+    accent = (255, 255, 255, 255) if msg.out else th.header_accent
+    circle_bg = (255, 255, 255, 235) if msg.out else (105, 180, 234, 255)
+    glyph = th.bubble_out[:3] + (255,) if msg.out else (255, 255, 255, 255)
+    cx, cy = PX(11) + PX(VOICE_PLAY_D) // 2, h // 2 if m["kind"] != "voice" else PX(33)
+
+    if m["kind"] == "voice":
+        _play_circle(layer, d, cx, cy, PX(VOICE_PLAY_D), circle_bg, glyph, "play")
+        x0 = PX(WAVE_X)
+        x1 = w - PX(52)
+        pitch = PX(WAVE_BAR + WAVE_GAP)
+        n = max(4, int((x1 - x0) / pitch))
+        wave_col = (255, 255, 255, 190) if msg.out else (94, 138, 170, 255)
+        mid = cy
+        for i, k in enumerate(_wave_heights(msg.duration + msg.time, n)):
+            bh = max(PX(1.5), int(PX(WAVE_MAX_H) * k / 2))
+            bx = x0 + i * pitch
+            d.rounded_rectangle((bx, mid - bh, bx + PX(WAVE_BAR), mid + bh),
+                                radius=PX(WAVE_BAR / 2), fill=wave_col)
+        d.text((x0, cy + PX(14)), msg.duration or "0:30", font=font(13, 500), fill=time_color)
+        _transcribe_btn(d, w - PX(48), PX(14), accent)
+    elif m["kind"] == "file":
+        _play_circle(layer, d, cx, cy, PX(VOICE_PLAY_D), circle_bg, glyph, "doc")
+        d.text((PX(WAVE_X + 11), PX(15)), msg.file_name or "document.pdf",
+               font=font(16, 600), fill=text_color)
+        d.text((PX(WAVE_X + 11), PX(38)), msg.file_size or "2,4 МБ",
+               font=font(14), fill=time_color)
+    else:  # звонок
+        _play_circle(layer, d, cx, cy, PX(VOICE_PLAY_D), circle_bg, glyph, "call")
+        title = "Пропущенный звонок" if msg.call_missed else "Входящий звонок"
+        d.text((PX(WAVE_X + 11), PX(12)), title, font=font(16, 600), fill=text_color)
+        d.text((PX(WAVE_X + 11), PX(34)), msg.duration or "не отвечено",
+               font=font(14), fill=time_color)
+
+    tw = int(ft.getlength(msg.time))
+    tx = w - PX(PAD_X) - tw - (PX(TICK_W) if msg.out else 0)
+    ty = h - PX(22)
+    d.text((tx, ty), msg.time, font=ft, fill=time_color)
+    if msg.out:
+        _tick(d, tx + tw + PX(4), ty + PX(4), th.tick, msg.read)
+
+
+def _draw_bare(canvas: Image.Image, msg: Msg, th: Theme, m: dict, x: int, y: int) -> None:
+    """Кружок и стикер живут без пузыря — прямо на обоях."""
+    D = m["w"]
+    layer = Image.new("RGBA", (D + PX(150), D + PX(40)), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    ft = font(TIME_PT, 500)
+
+    if m["kind"] == "videonote":
+        src = msg.photo or mesh_gradient((D, D), ((90, 96, 110), (70, 76, 90),
+                                                 (60, 64, 76), (84, 90, 104)))
+        pic = src.convert("RGB")
+        side = min(pic.size)
+        pic = pic.crop(((pic.width - side) // 2, (pic.height - side) // 2,
+                        (pic.width + side) // 2, (pic.height + side) // 2)).resize((D, D), Image.LANCZOS)
+        mask = Image.new("L", (D * 2, D * 2), 0)
+        ImageDraw.Draw(mask).ellipse((0, 0, D * 2 - 1, D * 2 - 1), fill=255)
+        layer.paste(pic.convert("RGBA"), (0, 0), mask.resize((D, D), Image.LANCZOS))
+        # длительность в левом нижнем углу описанного квадрата
+        d.text((int(D * 0.14), D - PX(24)), msg.duration or "0:10",
+               font=font(14, 500), fill=(255, 255, 255, 240))
+        # перечёркнутый динамик по центру низа
+        mx, my = D // 2, D - PX(42)
+        d.polygon([(mx - PX(9), my - PX(4)), (mx - PX(4), my - PX(4)), (mx + PX(1), my - PX(9)),
+                   (mx + PX(1), my + PX(9)), (mx - PX(4), my + PX(4)), (mx - PX(9), my + PX(4))],
+                  fill=(255, 255, 255, 235))
+        d.line((mx + PX(5), my - PX(5), mx + PX(13), my + PX(5)), fill=(255, 255, 255, 235), width=PX(2))
+        d.line((mx + PX(13), my - PX(5), mx + PX(5), my + PX(5)), fill=(255, 255, 255, 235), width=PX(2))
+        _transcribe_btn(d, D + PX(14), D - PX(78), th.header_accent)
+        d.text((D + PX(66), D - PX(68)), msg.time, font=ft, fill=(255, 255, 255, 200))
+    else:  # стикер
+        em = render_emoji(msg.sticker or "🙂", D)
+        if em is not None:
+            layer.alpha_composite(em, (0, 0))
+        tw = int(ft.getlength(msg.time))
+        d.rounded_rectangle((D - tw - PX(18), D - PX(26), D + PX(4), D - PX(4)),
+                            radius=PX(11), fill=(0, 0, 0, 105))
+        d.text((D - tw - PX(10), D - PX(23)), msg.time, font=ft, fill=(255, 255, 255, 235))
+
+    canvas.alpha_composite(layer, (x, y))
+
+    if msg.reaction:                       # реакция уходит ПОД кружок, отдельным чипом
+        rl = Image.new("RGBA", (PX(90), PX(REACT_H)), (0, 0, 0, 0))
+        rd = ImageDraw.Draw(rl)
+        ew = PX(REACT_H * 0.66)
+        rd.rounded_rectangle((0, 0, PX(9) + ew * 2 + PX(14), PX(REACT_H)),
+                             radius=PX(REACT_H / 2), fill=th.header_accent[:3] + (80,))
+        em = render_emoji(msg.reaction, int(ew))
+        if em is not None:
+            rl.alpha_composite(em, (PX(9), int((PX(REACT_H) - ew) / 2)))
+        rl.alpha_composite(_avatar(int(ew), msg.reactor, msg.reactor_photo)
+                           if (msg.reactor or msg.reactor_photo) else _blank_avatar(int(ew)),
+                           (PX(9) + int(ew) + PX(5), int((PX(REACT_H) - ew) / 2)))
+        canvas.alpha_composite(rl, (x, y + D + PX(6)))
 
 
 def _draw_bubble(canvas: Image.Image, msg: Msg, th: Theme, m: dict,
@@ -510,6 +699,11 @@ def _draw_bubble(canvas: Image.Image, msg: Msg, th: Theme, m: dict,
     text_color = th.text_out if msg.out else th.text_in
     time_color = th.time_out if msg.out else th.time_in
     bare_photo = m["photo_h"] and not m["lines"] and not msg.forwarded_from and not msg.reply_name
+    if m["kind"] in ("voice", "file", "call"):
+        _draw_media_row(layer, d, msg, th, m, text_color, time_color, ft)
+        canvas.alpha_composite(layer, (x, y))
+        return
+
     cy = 0 if bare_photo else PX(PAD_Y)
 
     if msg.forwarded_from:
@@ -872,7 +1066,10 @@ def make_chat_screenshot(messages: Sequence[Msg], *, theme: str = "ios_dark",
         last_of_run = (i == len(msgs) - 1) or (msgs[i + 1].out != m.out)
         x = W - PX(EDGE) - mm["w"] if m.out else PX(EDGE)
         if y + mm["h"] > area_top - PX(40):
-            _draw_bubble(canvas, m, th, mm, x, y, last_of_run, grad)
+            if mm["kind"] in ("videonote", "sticker"):
+                _draw_bare(canvas, m, th, mm, x, y)
+            else:
+                _draw_bubble(canvas, m, th, mm, x, y, last_of_run, grad)
         y += mm["h"]
 
     _scroll_button(canvas, th)
