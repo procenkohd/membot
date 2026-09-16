@@ -93,6 +93,57 @@ def _emoji_font() -> Optional[ImageFont.FreeTypeFont]:
 # Битмап в шрифте всего 136x128, поэтому крупные эмодзи (стикер, реакция на
 # кружке) из него растягиваются в мыло. Для таких берём PNG 512x512 из набора
 # noto-emoji: один раз скачали, дальше лежит в кэше рядом с остальным состоянием.
+# Папка с выгруженными эппловскими эмодзи (см. tools/export_apple_emoji.py).
+# Если её нет — молча работаем на Noto, рендер не ломается.
+EMOJI_DIR = Path(os.environ.get("EMOJI_DIR", "")) if os.environ.get("EMOJI_DIR") \
+    else FONTS_DIR / "emoji_apple"
+_TONES = {0x1F3FB: "1", 0x1F3FC: "2", 0x1F3FD: "3", 0x1F3FE: "4", 0x1F3FF: "5"}
+_GENDER = {0x2640: "W", 0x2642: "M"}
+
+
+def _apple_names(cluster: str) -> list:
+    """Имена глифов у Apple строятся из кодов: u1F601, u0031_u20E3,
+    u1F468_u1F4BB.0, а пол и тон кожи уходят в суффиксы .M/.W и .1-.5."""
+    bases, digits, gender = [], [], None
+    for ch in cluster:
+        cp = ord(ch)
+        if cp in (0xFE0F, 0x200D):
+            continue
+        if cp in _TONES:
+            digits.append(_TONES[cp])
+        elif cp in _GENDER and bases:
+            gender = _GENDER[cp]
+        else:
+            bases.append(cp)
+    if not bases:
+        return []
+    base = "u" + "_u".join(f"{c:04X}" for c in bases)
+    tones = ([("".join(digits)), "0"] if digits else ["0", ""])
+    genders = ([gender, ""] if gender else [""])
+    names = []
+    for t in tones:
+        for g in genders:
+            n = base + (f".{t}" if t else "") + (f".{g}" if g else "")
+            if n not in names:
+                names.append(n)
+    if base not in names:
+        names.append(base)
+    return names
+
+
+def _apple_emoji(cluster: str) -> Optional[Image.Image]:
+    if not EMOJI_DIR.is_dir():
+        return None
+    for name in _apple_names(cluster):
+        path = EMOJI_DIR / f"{name}.png"
+        if path.exists():
+            try:
+                return Image.open(path).convert("RGBA")
+            except Exception:
+                return None
+    return None
+
+
 EMOJI_PNG_URL = "https://raw.githubusercontent.com/googlefonts/noto-emoji/main/png/512/{}.png"
 EMOJI_PNG_MIN = 110          # ниже этого размера шрифт и так резкий
 _EMOJI_PNG_MISS: set = set()
@@ -145,18 +196,20 @@ def render_emoji(ch: str, px: int) -> Optional[Image.Image]:
     key = (ch, px)
     if key in _EMOJI_CACHE:
         return _EMOJI_CACHE[key]
-    if px >= EMOJI_PNG_MIN and not os.environ.get(EMOJI_FONT_ENV, "").strip():
+    # Порядок источников: эппловская выгрузка -> нотовские PNG 512 -> шрифт.
+    hi = _apple_emoji(ch)
+    if hi is None and px >= EMOJI_PNG_MIN and not os.environ.get(EMOJI_FONT_ENV, "").strip():
         hi = _emoji_png(ch)
-        if hi is not None:
-            bb = hi.getbbox()          # в PNG свои поля, режем по содержимому,
-            if bb:                     # иначе эмодзи выходит мельче шрифтового
-                hi = hi.crop(bb)
-            side = max(hi.size)
-            sq = Image.new("RGBA", (side, side), (0, 0, 0, 0))
-            sq.paste(hi, ((side - hi.width) // 2, (side - hi.height) // 2), hi)
-            out = sq.resize((px, px), Image.LANCZOS)
-            _EMOJI_CACHE[key] = out
-            return out
+    if hi is not None:
+        bb = hi.getbbox()              # в PNG свои поля, режем по содержимому,
+        if bb:                         # иначе эмодзи выходит мельче шрифтового
+            hi = hi.crop(bb)
+        side = max(hi.size)
+        sq = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+        sq.paste(hi, ((side - hi.width) // 2, (side - hi.height) // 2), hi)
+        out = sq.resize((px, px), Image.LANCZOS)
+        _EMOJI_CACHE[key] = out
+        return out
     f = _emoji_font()
     if f is None:
         return None
