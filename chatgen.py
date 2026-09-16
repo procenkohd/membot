@@ -12,6 +12,7 @@ SCALE — так константы совпадают с теми, что ви�
 from __future__ import annotations
 
 import math
+import os
 import random
 import re
 from dataclasses import dataclass, field
@@ -61,17 +62,31 @@ _EMOJI_FONT: Optional[ImageFont.FreeTypeFont] = None
 _EMOJI_CACHE: dict = {}
 EMOJI_NATIVE = 109
 
+# Битмапные эмодзи-шрифты открываются только в «родных» размерах: у Noto это
+# 109, у эппловского — 96 и 160. Поэтому подбираем первый, который откроется.
+_EMOJI_STRIKES = (160, 137, 128, 109, 96, 64)
+
+# Свой шрифт эмодзи можно подсунуть переменной EMOJI_FONT — например, системный
+# эппловский, чтобы скрин был как с айфона. В репозиторий он не кладётся:
+# это чужой артворк, и класть его на сервер — отдельное решение владельца бота.
+EMOJI_FONT_ENV = "EMOJI_FONT"
+
 
 def _emoji_font() -> Optional[ImageFont.FreeTypeFont]:
-    global _EMOJI_FONT
+    global _EMOJI_FONT, EMOJI_NATIVE
     if _EMOJI_FONT is None:
-        path = FONTS_DIR / "NotoColorEmoji.ttf"
-        if not path.exists():
-            return None
-        try:
-            _EMOJI_FONT = ImageFont.truetype(str(path), EMOJI_NATIVE)
-        except Exception:
-            return None
+        custom = os.environ.get(EMOJI_FONT_ENV, "").strip()
+        candidates = ([Path(custom)] if custom else []) + [FONTS_DIR / "NotoColorEmoji.ttf"]
+        for path in candidates:
+            if not path.exists():
+                continue
+            for size in _EMOJI_STRIKES:
+                try:
+                    _EMOJI_FONT = ImageFont.truetype(str(path), size)
+                    EMOJI_NATIVE = size
+                    return _EMOJI_FONT
+                except Exception:
+                    continue
     return _EMOJI_FONT
 
 
@@ -130,7 +145,7 @@ def render_emoji(ch: str, px: int) -> Optional[Image.Image]:
     key = (ch, px)
     if key in _EMOJI_CACHE:
         return _EMOJI_CACHE[key]
-    if px >= EMOJI_PNG_MIN:
+    if px >= EMOJI_PNG_MIN and not os.environ.get(EMOJI_FONT_ENV, "").strip():
         hi = _emoji_png(ch)
         if hi is not None:
             bb = hi.getbbox()          # в PNG свои поля, режем по содержимому,
@@ -177,19 +192,25 @@ def glyph(ch: str, px_size: int, color) -> Optional[Image.Image]:
     return solid
 
 
-# Диапазоны эмодзи: пиктограммы, символы, флаги, стрелки-дингбаты.
+# Разбор эмодзи по правилам UTS#51. Важно разбирать именно «кластерами»:
+# 👨‍💻 — это три кодовые точки, 🇷🇺 — две, 1️⃣ — три, и рвать их нельзя.
+_BASE = ("[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U00002190-\U000025FF"
+         "\U00002B00-\U00002BFF\u3030\u303D\u3297\u3299\u00A9\u00AE\u2122]")
+_SKIN = "[\U0001F3FB-\U0001F3FF]"
+_ELEM = f"(?:{_BASE}\uFE0F?{_SKIN}?)"
 _EMOJI_RE = re.compile(
-    "([\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF"
-    "\U00002190-\U00002BFF\U0000FE0F\U00002122\U000000A9\U000000AE]"
-    "[\U0000FE0F\U0000200D\U0001F3FB-\U0001F3FF]*)+"
+    "(?:"
+    "[0-9#*]\uFE0F?\u20E3"                 # клавиша: 1️⃣
+    "|[\U0001F1E6-\U0001F1FF]{2}"          # флаг: пара региональных индикаторов
+    f"|{_ELEM}(?:\u200D{_ELEM})*"           # обычный, в т.ч. склейка через ZWJ
+    ")"
 )
 
 
 def split_runs(text: str) -> list:
-    """Режет строку на куски «обычный текст» / «эмодзи» — рисуются они разными
-    шрифтами, поэтому и меряются отдельно."""
-    runs = []
-    pos = 0
+    """Режет строку на куски «обычный текст» / «одна эмодзи». Каждый эмодзи-кусок
+    — ровно один кластер, поэтому идущие подряд смайлы не схлопываются."""
+    runs, pos = [], 0
     for m in _EMOJI_RE.finditer(text):
         if m.start() > pos:
             runs.append(("text", text[pos:m.start()]))
@@ -202,11 +223,8 @@ def split_runs(text: str) -> list:
 
 def measure_runs(runs: Sequence, f: ImageFont.FreeTypeFont, emoji_px: int) -> int:
     w = 0
-    for kind, s in runs:
-        if kind == "text":
-            w += int(f.getlength(s))
-        else:
-            w += emoji_px * max(1, len(_EMOJI_RE.findall(s)) or 1)
+    for kind, sub in runs:
+        w += int(f.getlength(sub)) if kind == "text" else emoji_px
     return w
 
 
@@ -216,22 +234,21 @@ def measure(text: str, f: ImageFont.FreeTypeFont, emoji_px: int) -> int:
 
 def draw_runs(img: Image.Image, xy, text: str, f: ImageFont.FreeTypeFont,
               fill, emoji_px: int, line_h: int) -> None:
-    """Рисует строку, подменяя шрифт на эмодзи-битмапы там, где надо."""
+    """Рисует строку, подменяя шрифт на эмодзи-картинки там, где надо."""
     x, y = xy
     d = ImageDraw.Draw(img)
-    for kind, s in split_runs(text):
+    for kind, sub in split_runs(text):
         if kind == "text":
-            d.text((x, y), s, font=f, fill=fill)
-            x += int(f.getlength(s))
+            d.text((x, y), sub, font=f, fill=fill)
+            x += int(f.getlength(sub))
         else:
-            for token in _EMOJI_RE.findall(s) or [s]:
-                em = render_emoji(token, emoji_px)
-                if em is None:
-                    d.text((x, y), token, font=f, fill=fill)
-                    x += int(f.getlength(token))
-                else:
-                    img.alpha_composite(em, (int(x), int(y + (line_h - emoji_px) / 2)))
-                    x += emoji_px
+            em = render_emoji(sub, emoji_px)
+            if em is None:                      # нет картинки — рисуем шрифтом
+                d.text((x, y), sub, font=f, fill=fill)
+                x += int(f.getlength(sub))
+            else:
+                img.alpha_composite(em, (int(x), int(y + (line_h - emoji_px) / 2)))
+                x += emoji_px
 
 
 def wrap_text(text: str, f: ImageFont.FreeTypeFont, max_w: int, emoji_px: int) -> list:
