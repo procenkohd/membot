@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import random
 from io import BytesIO
+from pathlib import Path
 from typing import Optional
 
 from aiogram import Bot, F, Router
@@ -22,6 +23,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     BufferedInputFile,
+    FSInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -293,13 +295,22 @@ async def got_my_avatar(message: Message, state: FSMContext) -> None:
     await _ask_theme(message, state)
 
 
+THEME_PREVIEW = Path(__file__).parent / "assets" / "theme_preview.jpg"
+
+
 async def _ask_theme(message: Message, state: FSMContext) -> None:
+    """Оформление показываем картинкой: словами «тема» человек понимает
+    «о чём переписка», а не «как она выглядит»."""
     await state.set_state(ChatStates.settings)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🌑 тёмная", callback_data="chat:theme:ios_dark")],
-        [InlineKeyboardButton(text="🩵 тёмная с узором", callback_data="chat:theme:ios_teal")],
+        [InlineKeyboardButton(text="1 — обычная тёмная", callback_data="chat:theme:ios_dark")],
+        [InlineKeyboardButton(text="2 — чёрная с узором", callback_data="chat:theme:ios_teal")],
     ])
-    await message.answer("какой чат рисуем?", reply_markup=kb)
+    caption = "как должен выглядеть чат? выбери вариант с картинки"
+    if THEME_PREVIEW.exists():
+        await message.answer_photo(FSInputFile(THEME_PREVIEW), caption=caption, reply_markup=kb)
+    else:
+        await message.answer(caption, reply_markup=kb)
 
 
 @router.callback_query(F.data == SKIP)
@@ -334,7 +345,11 @@ async def pick_theme(callback: CallbackQuery, state: FSMContext) -> None:
         [InlineKeyboardButton(text="вечер, 21:07", callback_data="chat:time:21:07"),
          InlineKeyboardButton(text="ночь, 03:12", callback_data="chat:time:03:12")],
     ])
-    await callback.message.edit_text("во сколько идёт переписка?", reply_markup=kb)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.message.answer("во сколько идёт переписка?", reply_markup=kb)
 
 
 @router.callback_query(F.data.startswith("chat:time:"))

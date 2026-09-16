@@ -1146,21 +1146,6 @@ def _input_bar(canvas: Image.Image, th: Theme) -> None:
                         radius=PX(3), fill=(255, 255, 255, 190) if th.dark else (0, 0, 0, 170))
 
 
-def _scroll_button(canvas: Image.Image, th: Theme) -> None:
-    W, H = canvas.size
-    cx = W - PX(37)
-    cy = H - PX(HOME_H + INPUT_H) - PX(38)
-    r = PX(23)
-    region = canvas.crop((cx - r, cy - r, cx + r, cy + r)).filter(ImageFilter.GaussianBlur(PX(10)))
-    region.alpha_composite(Image.new("RGBA", region.size, (44, 44, 48, 205)))
-    mask = Image.new("L", (r * 4, r * 4), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, r * 4 - 1, r * 4 - 1), fill=255)
-    canvas.paste(region, (cx - r, cy - r), mask.resize((r * 2, r * 2), Image.LANCZOS))
-    d = ImageDraw.Draw(canvas)
-    d.line((cx - PX(9), cy - PX(4), cx, cy + PX(5)), fill=(235, 235, 240, 255), width=PX(2.4))
-    d.line((cx, cy + PX(5), cx + PX(9), cy - PX(4)), fill=(235, 235, 240, 255), width=PX(2.4))
-
-
 def _date_pill(canvas: Image.Image, th: Theme, text: str, y: int) -> int:
     layer, d = overlay(canvas)
     f = font(13, 600)
@@ -1226,7 +1211,6 @@ def make_chat_screenshot(messages: Sequence[Msg], *, theme: str = "ios_dark",
                 _draw_bubble(canvas, m, th, mm, x, y, last_of_run, grad)
         y += mm["h"]
 
-    _scroll_button(canvas, th)
     _header(canvas, th, contact_name, subtitle, avatar, unread)
     if pinned:
         _pinned(canvas, th, pinned)
