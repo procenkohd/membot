@@ -26,8 +26,8 @@ FONTS_DIR = BASE_DIR / "fonts"
 
 # Экран iPhone 15 Pro: 393x852 пойнта при плотности 3. Все константы ниже -
 # в пойнтах, PX() переводит их в пиксели холста.
-SCREEN_W_PT = 393
-SCREEN_H_PT = 852
+SCREEN_W_PT = 390
+SCREEN_H_PT = 844
 SCALE = 3
 
 
@@ -211,8 +211,8 @@ def _bezier(pts: Sequence, steps: int = 24) -> list:
     return out
 
 
-TAIL_W = 6.5   # насколько хвостик вылезает за грань пузыря, пойнты
-TAIL_H = 14
+TAIL_W = 5.7   # насколько хвостик вылезает за грань пузыря, пойнты
+TAIL_H = 8
 
 
 def bubble_mask(w: int, h: int, r: int, tail: Optional[str]):
@@ -276,17 +276,23 @@ def _snowflake(d: ImageDraw.ImageDraw, cx: float, cy: float, rad: float, color, 
 
 
 def snow_pattern(size, color) -> Image.Image:
-    """Узор со снежинками поверх обоев — приближение к тем, что на референсе."""
+    """Узор со снежинками поверх обоев. На референсе он плотный и разнокалиберный:
+    крупные снежинки вперемешку с мелкими ромбами, поэтому одной сеткой не обойтись."""
     layer = Image.new("RGBA", size, (0, 0, 0, 0))
     d = ImageDraw.Draw(layer)
     rnd = random.Random(20)
-    step = PX(96)
-    for row, y in enumerate(range(-step // 2, size[1] + step, step)):
-        for col, x in enumerate(range(-step // 2, size[0] + step, step)):
-            ox = x + (step // 2 if row % 2 else 0) + rnd.randint(-PX(10), PX(10))
-            oy = y + rnd.randint(-PX(10), PX(10))
-            rad = PX(rnd.choice((20, 26, 32)))
-            _snowflake(d, ox, oy, rad, color, max(1, PX(0.8)))
+    w = max(1, PX(0.9))
+    step = PX(84)
+    for row, y in enumerate(range(-step, size[1] + step, step)):
+        for x in range(-step, size[0] + step, step):
+            ox = x + (step // 2 if row % 2 else 0) + rnd.randint(-PX(9), PX(9))
+            oy = y + rnd.randint(-PX(9), PX(9))
+            _snowflake(d, ox, oy, PX(rnd.choice((22, 28, 34))), color, w)
+            # мелкий ромб в промежутке — он и создаёт ощущение плотного узора
+            mx, my = ox + step // 2, oy + step // 2
+            r = PX(rnd.choice((5, 7, 9)))
+            d.polygon([(mx, my - r), (mx + r, my), (mx, my + r), (mx - r, my)],
+                      outline=color, width=w)
     return layer
 
 
@@ -301,7 +307,7 @@ class Theme:
     pattern_color: tuple = (255, 255, 255, 18)
     bubble_in: tuple = (39, 39, 42, 235)
     bubble_out: tuple = (61, 125, 230, 255)
-    bubble_out_grad: Optional[tuple] = None   # (верхний, нижний) — градиент на весь чат
+    bubble_out_grad: Optional[tuple] = None   # 4 угла градиента на весь чат
     text_in: tuple = (255, 255, 255, 255)
     text_out: tuple = (255, 255, 255, 255)
     time_in: tuple = (255, 255, 255, 110)
@@ -331,22 +337,26 @@ THEMES = {
         wallpaper=((28, 38, 52), (22, 30, 43), (18, 25, 36), (30, 41, 56)),
         bubble_in=(39, 39, 42, 240),
         bubble_out=(60, 120, 228, 255),
-        bubble_out_grad=((74, 138, 244), (46, 100, 214)),
+        bubble_out_grad=((74, 138, 244), (86, 150, 250), (46, 100, 214), (58, 112, 226)),
+        font_pt=17.6,
+        max_bubble=0.795,
     ),
     "ios_teal": Theme(
         key="ios_teal",
         title="бирюзовая (как у тебя)",
-        wallpaper=((10, 12, 20), (8, 10, 16), (6, 8, 14), (12, 14, 24)),
+        # обои у референса — чистый чёрный с узором, а не тёмно-синий градиент
+        wallpaper=((0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0)),
         pattern="snow",
-        pattern_color=(70, 120, 200, 40),
-        bubble_in=(44, 44, 48, 225),
-        bubble_out=(26, 160, 190, 255),
-        bubble_out_grad=((22, 176, 196), (28, 108, 224)),
+        pattern_color=(26, 54, 92, 150),
+        bubble_in=(32, 30, 35, 250),
+        bubble_out=(66, 148, 172, 255),
+        # диагональ: бирюза справа-сверху, синий слева-снизу
+        bubble_out_grad=((69, 154, 166), (78, 172, 187), (53, 122, 192), (78, 172, 190)),
         time_out=(255, 255, 255, 190),
-        header_bg=(58, 58, 64, 205),
+        header_bg=(28, 28, 30, 205),
         glass_header=True,
-        font_pt=18.0,
-        max_bubble=0.815,
+        font_pt=17.6,
+        max_bubble=0.795,
     ),
 }
 
@@ -373,16 +383,20 @@ class Msg:
 
 
 # Метрики в пойнтах. Взяты из макета iOS-телеграма.
-PAD_X, PAD_Y = 12, 7
-BUBBLE_R = 18
-MAX_BUBBLE = 0.74 * SCREEN_W_PT
-EDGE = 9
-GAP_SAME, GAP_DIFF = 3, 9
-TIME_PT = 11.5
-TIME_GAP = 7
+# Всё ниже снято пипеткой с реального скриншота, а не подобрано на глаз:
+# однострочный пузырь ровно 33pt, двустрочный 56pt -> строка 23pt, паддинг 5pt.
+# Ширины семи пузырей сходятся на кегле 17.6pt с разбросом меньше 1pt.
+PAD_X, PAD_Y = 10, 5
+BUBBLE_R = 14
+MAX_BUBBLE = 0.795 * SCREEN_W_PT
+EDGE = 10
+GAP_SAME, GAP_DIFF = 2.5, 7
+TIME_PT = 11.2
+TIME_GAP = 8.2
+TICK_W = 11
 PHOTO_MAX = 250
 REPLY_H = 40
-REACT_H = 27
+REACT_H = 30
 FWD_H = 41
 
 
@@ -403,12 +417,12 @@ def _measure(msg: Msg, th: Theme) -> dict:
     ft = font(TIME_PT, 500)
     emoji_px = PX(th.font_pt * 1.15)
     max_text_w = PX(SCREEN_W_PT * th.max_bubble) - PX(PAD_X) * 2
-    line_h = PX(th.font_pt * 1.26)
+    line_h = PX(th.font_pt * 1.307)
 
     max_bubble_w = PX(SCREEN_W_PT * th.max_bubble)
     lines = wrap_text(msg.text, f, max_text_w, emoji_px) if msg.text.strip() else []
     views_w = (PX(19) + int(ft.getlength(str(msg.views)))) if msg.views is not None else 0
-    time_w = int(ft.getlength(msg.time)) + (PX(13) if msg.out else 0) + views_w
+    time_w = int(ft.getlength(msg.time)) + (PX(TICK_W) if msg.out else 0) + views_w
 
     def fits(ls):
         return bool(ls) and measure(ls[-1], f, emoji_px) + PX(TIME_GAP) + time_w <= max_text_w
@@ -559,7 +573,7 @@ def _draw_bubble(canvas: Image.Image, msg: Msg, th: Theme, m: dict,
     # время: либо в хвосте последней строки, либо отдельной строкой справа
     tw = int(ft.getlength(msg.time))
     views_w = (PX(19) + int(ft.getlength(str(msg.views)))) if msg.views is not None else 0
-    tx = w - PX(PAD_X) - tw - (PX(13) if msg.out else 0)
+    tx = w - PX(PAD_X) - tw - (PX(TICK_W) if msg.out else 0)
     if m["photo_h"] and not m["lines"]:
         ty = m["photo_h"] - PX(22)
         d.rounded_rectangle((tx - PX(7), ty - PX(3), w - PX(5), ty + PX(16)),
@@ -833,8 +847,7 @@ def make_chat_screenshot(messages: Sequence[Msg], *, theme: str = "ios_dark",
 
     grad = None
     if th.bubble_out_grad:
-        top, bot = th.bubble_out_grad
-        grad = mesh_gradient((W, H), (top, top, bot, bot))
+        grad = mesh_gradient((W, H), th.bubble_out_grad)
 
     area_top = PX(STATUS_H + HEADER_H) + PX(8) + (PX(PINNED_H + 6) if pinned else 0)
     area_bottom = H - PX(HOME_H + INPUT_H) - PX(8)

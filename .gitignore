@@ -10,3 +10,4 @@ phrases_user.txt
 data/
 .playwright-mcp/
 backups/
+ref/
