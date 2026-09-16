@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import random
 from io import BytesIO
 from typing import Optional
@@ -140,15 +141,29 @@ def builder_kb(draft: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def show_builder(message: Message, draft: dict, edit: bool = False) -> None:
+async def show_builder(message: Message, draft: dict, edit: bool = False,
+                       state: Optional[FSMContext] = None) -> None:
+    """Панель конструктора всегда должна быть последним сообщением в чате,
+    иначе после каждой реплики она уезжает вверх, а кнопки под ней остаются
+    живыми. Поэтому при обновлении старую панель удаляем, а не плодим новые."""
     text, kb = describe(draft), builder_kb(draft)
-    try:
-        if edit:
+    if edit:
+        try:
             await message.edit_text(text, reply_markup=kb)
             return
-    except Exception:
-        pass
-    await message.answer(text, reply_markup=kb)
+        except Exception:
+            pass
+    if state is not None:
+        data = await state.get_data()
+        old_id = data.get("builder_msg")
+        if old_id:
+            try:
+                await message.bot.delete_message(message.chat.id, old_id)
+            except Exception:
+                pass
+    sent = await message.answer(text, reply_markup=kb)
+    if state is not None:
+        await state.update_data(builder_msg=sent.message_id)
 
 
 # ---------- сборка картинки ----------
@@ -204,8 +219,11 @@ async def build_messages(bot: Bot, draft: dict) -> list:
 async def render_draft(bot: Bot, draft: dict) -> BytesIO:
     msgs = await build_messages(bot, draft)
     avatar = await _img(bot, draft.get("contact_avatar"))
-    return chatgen.make_chat_screenshot(
-        msgs, theme=draft["theme"], contact_name=draft["contact_name"] or "Контакт",
+    # рисование синхронное и на слабом ядре занимает заметное время — уводим в
+    # поток, иначе на время отрисовки бот замирает для всех остальных
+    return await asyncio.to_thread(
+        chatgen.make_chat_screenshot, msgs,
+        theme=draft["theme"], contact_name=draft["contact_name"] or "Контакт",
         subtitle="был(а) недавно", avatar=avatar,
         unread=random.Random(len(msgs)).randint(3, 900),
         clock=draft["start"],
@@ -303,7 +321,10 @@ async def skip_step(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("chat:theme:"))
 async def pick_theme(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
-    draft = data["draft"]
+    draft = data.get("draft")
+    if draft is None:
+        await callback.answer("переписка потерялась, начни заново", show_alert=True)
+        return
     draft["theme"] = callback.data.split(":")[2]
     await state.update_data(draft=draft)
     await callback.answer()
@@ -319,7 +340,10 @@ async def pick_theme(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("chat:time:"))
 async def pick_time(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
-    draft = data["draft"]
+    draft = data.get("draft")
+    if draft is None:
+        await callback.answer("переписка потерялась, начни заново", show_alert=True)
+        return
     draft["start"] = callback.data.split("chat:time:")[1]
     await state.update_data(draft=draft)
     await callback.answer()
@@ -336,7 +360,10 @@ async def pick_time(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("chat:step:"))
 async def pick_step(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
-    draft = data["draft"]
+    draft = data.get("draft")
+    if draft is None:
+        await callback.answer("переписка потерялась, начни заново", show_alert=True)
+        return
     draft["step"] = int(callback.data.split(":")[2])
     await state.update_data(draft=draft)
     await state.set_state(ChatStates.builder)
@@ -344,7 +371,7 @@ async def pick_step(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.message.edit_text(
         "всё, настроили. дальше просто пиши реплики — каждая станет сообщением.\n"
         "кидай фото — станет картинкой в чате. эмодзи работают как обычно")
-    await show_builder(callback.message, draft)
+    await show_builder(callback.message, draft, state=state)
 
 
 # ---------- конструктор ----------
@@ -370,7 +397,7 @@ def _add(draft: dict, **fields) -> None:
 
 async def _save_and_refresh(message: Message, state: FSMContext, draft: dict) -> None:
     await state.update_data(draft=draft)
-    await show_builder(message, draft)
+    await show_builder(message, draft, state=state)
 
 
 @router.message(ChatStates.builder, F.text)
@@ -553,7 +580,7 @@ async def sticker_from_text(message: Message, state: FSMContext) -> None:
     _add(draft, kind="sticker", sticker=runs[0])
     await state.update_data(draft=draft)
     await state.set_state(ChatStates.builder)
-    await show_builder(message, draft)
+    await show_builder(message, draft, state=state)
 
 
 async def _finish_videonote(message: Message, state: FSMContext, file_id: Optional[str]) -> None:
@@ -562,7 +589,7 @@ async def _finish_videonote(message: Message, state: FSMContext, file_id: Option
     _add(draft, kind="videonote", photo=file_id, duration=random.choice(("0:06", "0:11", "0:24")))
     await state.update_data(draft=draft)
     await state.set_state(ChatStates.builder)
-    await show_builder(message, draft)
+    await show_builder(message, draft, state=state)
 
 
 @router.message(ChatStates.wait_photo_for, F.photo)
@@ -578,7 +605,7 @@ async def file_name(message: Message, state: FSMContext) -> None:
          file_size=random.choice(FILE_SIZES))
     await state.update_data(draft=draft)
     await state.set_state(ChatStates.builder)
-    await show_builder(message, draft)
+    await show_builder(message, draft, state=state)
 
 
 # ---------- отрисовка ----------
@@ -618,7 +645,7 @@ async def render_more(callback: CallbackQuery, state: FSMContext) -> None:
         return
     await state.set_state(ChatStates.builder)
     await callback.answer()
-    await show_builder(callback.message, draft)
+    await show_builder(callback.message, draft, state=state)
 
 
 @router.callback_query(F.data == "chat:new")
