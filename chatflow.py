@@ -109,7 +109,6 @@ def describe(draft: dict) -> str:
     угловая скобка в тексте сломает разметку."""
     e = html.escape
     who = draft["my_name"] if draft["speaker_out"] else draft["contact_name"]
-    other = draft["contact_name"] if draft["speaker_out"] else draft["my_name"]
     lines = [f"<b>Переписка:</b> {e(draft['contact_name'])} и {e(draft['my_name'])}"]
 
     if not draft["items"]:
@@ -144,8 +143,9 @@ def describe(draft: dict) -> str:
         "",
         f"<b>Сейчас пишет: {e(who)}</b>",
         "Пиши текст или кидай фото — добавится сразу.",
-        # род собеседника неизвестен, поэтому без согласования глагола
-        f"<b>Переключить на {e(other)} — кнопка «🔄 сейчас пишет»</b>",
+        # имена не склоняем и род не угадываем: подставленное имя в падеже
+        # звучало бы коряво почти всегда
+        "<b>Чтобы говорил другой — жми «🔄 сейчас пишет»</b>",
     ]
     return "\n".join(lines)
 
