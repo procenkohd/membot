@@ -367,6 +367,9 @@ class Msg:
     photo: Optional[Image.Image] = None
     date: Optional[str] = None        # разделитель даты ПЕРЕД этим сообщением
     read: bool = True                 # две галочки vs одна
+    forwarded_from: Optional[str] = None     # «Переслано от ...»
+    forwarded_photo: Optional[Image.Image] = None
+    views: Optional[int] = None       # счётчик просмотров рядом со временем
 
 
 # Метрики в пойнтах. Взяты из макета iOS-телеграма.
@@ -380,6 +383,7 @@ TIME_GAP = 7
 PHOTO_MAX = 250
 REPLY_H = 40
 REACT_H = 27
+FWD_H = 41
 
 
 def _tick(d: ImageDraw.ImageDraw, x: int, y: int, color, double: bool) -> None:
@@ -402,15 +406,9 @@ def _measure(msg: Msg, th: Theme) -> dict:
     line_h = PX(th.font_pt * 1.26)
 
     max_bubble_w = PX(SCREEN_W_PT * th.max_bubble)
-    photo_w = photo_h = 0
-    if msg.photo is not None:
-        pw, ph = msg.photo.size
-        photo_w = PX(PHOTO_MAX)
-        photo_h = int(photo_w * ph / pw)
-        photo_h = min(photo_h, PX(330))
-
     lines = wrap_text(msg.text, f, max_text_w, emoji_px) if msg.text.strip() else []
-    time_w = int(ft.getlength(msg.time)) + (PX(13) if msg.out else 0)
+    views_w = (PX(19) + int(ft.getlength(str(msg.views)))) if msg.views is not None else 0
+    time_w = int(ft.getlength(msg.time)) + (PX(13) if msg.out else 0) + views_w
 
     def fits(ls):
         return bool(ls) and measure(ls[-1], f, emoji_px) + PX(TIME_GAP) + time_w <= max_text_w
@@ -427,6 +425,11 @@ def _measure(msg: Msg, th: Theme) -> dict:
     if msg.reaction:
         react_w = PX(16) + PX(REACT_H * 0.62) + PX(6) + int(font(13.5, 600).getlength(str(msg.reaction_count)))
 
+    fwd_w = 0
+    if msg.forwarded_from:
+        fwd_w = max(int(font(14, 500).getlength("Переслано от")),
+                    PX(21) + int(font(15, 600).getlength(msg.forwarded_from))) + PX(4)
+
     reply_w = 0
     if msg.reply_name:
         rf = font(14, 500)
@@ -434,18 +437,25 @@ def _measure(msg: Msg, th: Theme) -> dict:
                                       int(rf.getlength(msg.reply_text or ""))) + PX(14))
 
     content_w = max(text_w + (PX(TIME_GAP) + time_w if time_inline else 0),
-                    reply_w, react_w, 0)
+                    reply_w, react_w, fwd_w, 0)
     content_w = min(content_w, max_bubble_w - PX(PAD_X) * 2)
-    inner_w = max(content_w, photo_w if photo_w else 0)
-    if photo_w:
-        bubble_w = photo_w
+    photo_w = photo_h = inset = 0
+    if msg.photo is not None:
+        # пузырь тянется под подпись, но не уже картинки по умолчанию
+        bubble_w = max(min(max_bubble_w, content_w + PX(PAD_X) * 2), PX(PHOTO_MAX))
+        inset = PX(3) if (msg.forwarded_from or msg.reply_name) else 0
+        photo_w = int(bubble_w) - inset * 2
+        pw, ph = msg.photo.size
+        photo_h = min(int(photo_w * ph / pw), PX(360))
     else:
-        bubble_w = inner_w + PX(PAD_X) * 2
+        bubble_w = content_w + PX(PAD_X) * 2
     bubble_w = max(bubble_w, PX(56))
 
     h = 0
     if photo_h:
-        h += photo_h
+        h += photo_h + inset
+    if msg.forwarded_from:
+        h += PX(FWD_H)
     if msg.reply_name:
         h += PX(REPLY_H) + PX(4)
     if lines:
@@ -460,7 +470,7 @@ def _measure(msg: Msg, th: Theme) -> dict:
         bubble_h = h + PX(PAD_Y) * 2
 
     return dict(lines=lines, line_h=line_h, w=int(bubble_w), h=int(bubble_h),
-                time_inline=time_inline, time_w=time_w, photo_h=photo_h,
+                time_inline=time_inline, time_w=time_w, photo_h=photo_h, inset=inset,
                 photo_w=photo_w, emoji_px=emoji_px)
 
 
@@ -485,19 +495,18 @@ def _draw_bubble(canvas: Image.Image, msg: Msg, th: Theme, m: dict,
     ft = font(TIME_PT, 500)
     text_color = th.text_out if msg.out else th.text_in
     time_color = th.time_out if msg.out else th.time_in
-    cy = 0 if (m["photo_h"] and not m["lines"]) else PX(PAD_Y)
+    bare_photo = m["photo_h"] and not m["lines"] and not msg.forwarded_from and not msg.reply_name
+    cy = 0 if bare_photo else PX(PAD_Y)
 
-    if msg.photo is not None:
-        ph = msg.photo.convert("RGB").resize((m["photo_w"], m["photo_h"]), Image.LANCZOS)
-        pm, _ = bubble_mask(m["photo_w"], m["photo_h"], PX(BUBBLE_R), None)
-        if m["lines"]:
-            # низ картинки прямой, если под ней есть текст
-            ImageDraw.Draw(pm).rectangle(
-                (0, m["photo_h"] - PX(BUBBLE_R), m["photo_w"], m["photo_h"]), fill=255)
-        layer.paste(ph.convert("RGBA"), (0, cy), pm)
-        cy += m["photo_h"]
-        if m["lines"]:
-            cy += PX(PAD_Y)
+    if msg.forwarded_from:
+        fx, fy = PX(PAD_X), cy
+        accent = th.text_out if msg.out else th.header_accent
+        d.text((fx, fy), "Переслано от", font=font(14, 500), fill=accent)
+        av = _avatar(PX(17), msg.forwarded_from, msg.forwarded_photo)
+        layer.alpha_composite(av, (fx, fy + PX(20)))
+        d.text((fx + PX(21), fy + PX(19)), msg.forwarded_from,
+               font=font(15, 600), fill=accent)
+        cy += PX(FWD_H)
 
     if msg.reply_name:
         rx, ry = PX(PAD_X), cy
@@ -509,6 +518,18 @@ def _draw_bubble(canvas: Image.Image, msg: Msg, th: Theme, m: dict,
         d.text((rx + PX(9), ry + PX(4)), msg.reply_name, font=font(14, 600), fill=th.reply_name)
         d.text((rx + PX(9), ry + PX(21)), (msg.reply_text or "")[:40], font=font(14), fill=text_color)
         cy += PX(REPLY_H) + PX(4)
+
+    if msg.photo is not None:
+        ins = m["inset"]
+        pw_, ph_ = m["photo_w"], m["photo_h"]
+        pic = msg.photo.convert("RGB").resize((pw_, ph_), Image.LANCZOS)
+        # у вставленной внутрь пузыря картинки скругления мельче, чем у него самого
+        rad = PX(6) if ins else PX(BUBBLE_R)
+        pm, _ = bubble_mask(pw_, ph_, rad, None)
+        if m["lines"] and not ins:
+            ImageDraw.Draw(pm).rectangle((0, ph_ - rad, pw_, ph_), fill=255)
+        layer.paste(pic.convert("RGBA"), (ins, cy), pm)
+        cy += ph_ + (PX(PAD_Y) if m["lines"] else 0)
 
     for i, line in enumerate(m["lines"]):
         draw_runs(layer, (PX(PAD_X), cy), line, f, text_color, m["emoji_px"], m["line_h"])
@@ -537,6 +558,7 @@ def _draw_bubble(canvas: Image.Image, msg: Msg, th: Theme, m: dict,
 
     # время: либо в хвосте последней строки, либо отдельной строкой справа
     tw = int(ft.getlength(msg.time))
+    views_w = (PX(19) + int(ft.getlength(str(msg.views)))) if msg.views is not None else 0
     tx = w - PX(PAD_X) - tw - (PX(13) if msg.out else 0)
     if m["photo_h"] and not m["lines"]:
         ty = m["photo_h"] - PX(22)
@@ -548,6 +570,11 @@ def _draw_bubble(canvas: Image.Image, msg: Msg, th: Theme, m: dict,
     else:
         ty = cy
         cy += PX(TIME_PT * 1.2)
+    if msg.views is not None:
+        ex, ey = tx - views_w, ty + PX(7)
+        d.ellipse((ex, ey - PX(4), ex + PX(14), ey + PX(4)), outline=time_color, width=PX(1.3))
+        d.ellipse((ex + PX(5), ey - PX(2), ex + PX(9), ey + PX(2)), fill=time_color)
+        d.text((ex + PX(17), ty), str(msg.views), font=ft, fill=time_color)
     d.text((tx, ty), msg.time, font=ft, fill=time_color)
     if msg.out:
         _tick(d, tx + tw + PX(4), ty + PX(4), th.tick, msg.read)
@@ -558,6 +585,7 @@ def _draw_bubble(canvas: Image.Image, msg: Msg, th: Theme, m: dict,
 # ---------- обвязка экрана ----------
 
 STATUS_H, HEADER_H, INPUT_H, HOME_H = 59, 44, 52, 34
+PINNED_H = 52
 
 
 def _glass(canvas: Image.Image, box, radius: int, tint) -> None:
@@ -640,6 +668,46 @@ def _status_bar(canvas: Image.Image, th: Theme, clock: str) -> None:
 
 
 
+def _ellipsize(text: str, f: ImageFont.FreeTypeFont, max_w: int) -> str:
+    """Длинное имя в шапке телеграм режет многоточием, а не переносит."""
+    if measure(text, f, PX(17)) <= max_w:
+        return text
+    cut = text
+    while cut and measure(cut + "…", f, max_w) > max_w:
+        cut = cut[:-1]
+    return cut.rstrip() + "…"
+
+
+def _pinned(canvas: Image.Image, th: Theme, text: str) -> None:
+    W = canvas.width
+    top = PX(STATUS_H + HEADER_H) + PX(6)
+    x0, x1 = PX(14), W - PX(14)
+    if th.glass_header:
+        _glass(canvas, (x0, top, x1, top + PX(PINNED_H)), PX(20), th.header_bg)
+    else:
+        strip = canvas.crop((0, top, W, top + PX(PINNED_H))).filter(ImageFilter.GaussianBlur(PX(14)))
+        strip.alpha_composite(Image.new("RGBA", strip.size, th.header_bg))
+        canvas.paste(strip, (0, top))
+        x0 = PX(16)
+    layer, d = overlay(canvas)
+    d.rounded_rectangle((x0 + PX(12), top + PX(10), x0 + PX(14), top + PX(PINNED_H) - PX(10)),
+                        radius=PX(1), fill=th.header_accent)
+    d.text((x0 + PX(22), top + PX(9)), "Закреплённое сообщение",
+           font=font(14, 600), fill=th.header_accent)
+    d.text((x0 + PX(22), top + PX(27)), _ellipsize(text, font(15), W - x0 - PX(90)),
+           font=font(15), fill=th.header_text)
+    canvas.alpha_composite(layer)
+    # канцелярская кнопка справа: рисуем прямо и наклоняем поворотом
+    pin = Image.new("RGBA", (PX(30), PX(30)), (0, 0, 0, 0))
+    pd = ImageDraw.Draw(pin)
+    c = PX(15)
+    pd.rounded_rectangle((c - PX(5), PX(4), c + PX(5), PX(14)), radius=PX(2), fill=th.header_sub)
+    pd.rounded_rectangle((c - PX(8), PX(13), c + PX(8), PX(16)), radius=PX(1.5), fill=th.header_sub)
+    pd.line((c, PX(16), c, PX(25)), fill=th.header_sub, width=PX(2))
+    canvas.alpha_composite(pin.rotate(-35, resample=Image.BICUBIC),
+                           (x1 - PX(44), int(top + PX(PINNED_H / 2) - PX(15))))
+
+
 def _header(canvas: Image.Image, th: Theme, name: str, subtitle: str,
             avatar: Optional[Image.Image], unread: Optional[int]) -> None:
     W = canvas.width
@@ -667,8 +735,9 @@ def _header(canvas: Image.Image, th: Theme, name: str, subtitle: str,
         d.text((bx + PX(13), cy - PX(10)), str(unread), font=font(17, 500), fill=th.header_accent)
 
     fn, fs = font(17, 600), font(13)
+    name = _ellipsize(name, fn, W - PX(220))
     nw = measure(name, fn, PX(17))
-    d.text(((W - nw) / 2, cy - PX(16)), name, font=fn, fill=th.header_text)
+    draw_runs(canvas, ((W - nw) / 2, cy - PX(16)), name, fn, th.header_text, PX(17), PX(20))
     sw = fs.getlength(subtitle)
     d.text(((W - sw) / 2, cy + PX(4)), subtitle, font=fs, fill=th.header_sub)
 
@@ -749,6 +818,7 @@ def make_chat_screenshot(messages: Sequence[Msg], *, theme: str = "ios_dark",
                          subtitle: str = "был(а) 2 минуты назад",
                          avatar: Optional[Image.Image] = None,
                          unread: Optional[int] = None,
+                         pinned: Optional[str] = None,
                          clock: str = "13:17",
                          up_to: Optional[int] = None) -> BytesIO:
     """Собирает скриншот чата. up_to ограничивает число показанных сообщений —
@@ -766,7 +836,7 @@ def make_chat_screenshot(messages: Sequence[Msg], *, theme: str = "ios_dark",
         top, bot = th.bubble_out_grad
         grad = mesh_gradient((W, H), (top, top, bot, bot))
 
-    area_top = PX(STATUS_H + HEADER_H) + PX(8)
+    area_top = PX(STATUS_H + HEADER_H) + PX(8) + (PX(PINNED_H + 6) if pinned else 0)
     area_bottom = H - PX(HOME_H + INPUT_H) - PX(8)
 
     metrics = [_measure(m, th) for m in msgs]
@@ -794,6 +864,8 @@ def make_chat_screenshot(messages: Sequence[Msg], *, theme: str = "ios_dark",
 
     _scroll_button(canvas, th)
     _header(canvas, th, contact_name, subtitle, avatar, unread)
+    if pinned:
+        _pinned(canvas, th, pinned)
     _status_bar(canvas, th, clock)
     _input_bar(canvas, th)
 
