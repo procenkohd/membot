@@ -560,13 +560,18 @@ def _play_circle(layer: Image.Image, d: ImageDraw.ImageDraw, cx: int, cy: int,
         d.polygon([(cx + w_ - PX(7), cy - h_), (cx + w_, cy - h_ + PX(7)),
                    (cx + w_ - PX(7), cy - h_ + PX(7))], fill=bg)
     else:  # телефонная трубка
-        tile = Image.new("RGBA", (PX(40), PX(40)), (0, 0, 0, 0))
+        # рожок = дуга-мостик с утолщениями на концах, затем наклон
+        tile = Image.new("RGBA", (PX(44) * 2, PX(44) * 2), (0, 0, 0, 0))
         td = ImageDraw.Draw(tile)
-        td.rounded_rectangle((PX(5), PX(6), PX(15), PX(17)), radius=PX(4), fill=glyph)
-        td.rounded_rectangle((PX(25), PX(23), PX(35), PX(34)), radius=PX(4), fill=glyph)
-        td.line((PX(11), PX(13), PX(29), PX(28)), fill=glyph, width=PX(5))
-        layer.alpha_composite(tile.rotate(45, resample=Image.BICUBIC),
-                              (int(cx - PX(20)), int(cy - PX(20))))
+        S, r = PX(44), PX(17)
+        td.arc((S - r * 2, S + PX(4) - r * 2, S + r * 2, S + PX(4) + r * 2),
+               start=205, end=335, fill=glyph, width=PX(11))
+        for ang in (205, 335):
+            ex = S + r * 2 * math.cos(math.radians(ang))
+            ey = S + PX(4) + r * 2 * math.sin(math.radians(ang))
+            td.ellipse((ex - PX(9), ey - PX(9), ex + PX(9), ey + PX(9)), fill=glyph)
+        tile = tile.rotate(-32, resample=Image.BICUBIC).resize((PX(44), PX(44)), Image.LANCZOS)
+        layer.alpha_composite(tile, (int(cx - PX(22)), int(cy - PX(22))))
 
 
 def _transcribe_btn(d: ImageDraw.ImageDraw, x: int, y: int, accent) -> None:
