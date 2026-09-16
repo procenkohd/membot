@@ -99,6 +99,19 @@ def render_emoji(ch: str, px: int) -> Optional[Image.Image]:
     return out
 
 
+def glyph(ch: str, px_size: int, color) -> Optional[Image.Image]:
+    """Монохромная иконка из силуэта цветного эмодзи."""
+    em = render_emoji(ch, px_size)
+    if em is None:
+        return None
+    solid = Image.new("RGBA", em.size, tuple(color[:3]) + (255,))
+    a = em.getchannel("A")
+    if len(color) > 3 and color[3] < 255:
+        a = a.point(lambda v: v * color[3] // 255)
+    solid.putalpha(a)
+    return solid
+
+
 # Диапазоны эмодзи: пиктограммы, символы, флаги, стрелки-дингбаты.
 _EMOJI_RE = re.compile(
     "([\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF"
@@ -548,30 +561,21 @@ def _measure(msg: Msg, th: Theme) -> dict:
 
 
 def _play_circle(layer: Image.Image, d: ImageDraw.ImageDraw, cx: int, cy: int,
-                 diam: int, bg, glyph, kind: str) -> None:
+                 diam: int, bg, glyph_color, kind: str) -> None:
     r = diam // 2
     d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=bg)
     if kind == "play":
         t = diam * 0.28
-        d.polygon([(cx - t * 0.6, cy - t), (cx - t * 0.6, cy + t), (cx + t, cy)], fill=glyph)
+        d.polygon([(cx - t * 0.6, cy - t), (cx - t * 0.6, cy + t), (cx + t, cy)], fill=glyph_color)
     elif kind == "doc":
         w_, h_ = diam * 0.26, diam * 0.34
-        d.rounded_rectangle((cx - w_, cy - h_, cx + w_, cy + h_), radius=PX(2), fill=glyph)
+        d.rounded_rectangle((cx - w_, cy - h_, cx + w_, cy + h_), radius=PX(2), fill=glyph_color)
         d.polygon([(cx + w_ - PX(7), cy - h_), (cx + w_, cy - h_ + PX(7)),
                    (cx + w_ - PX(7), cy - h_ + PX(7))], fill=bg)
     else:  # телефонная трубка
-        # рожок = дуга-мостик с утолщениями на концах, затем наклон
-        tile = Image.new("RGBA", (PX(44) * 2, PX(44) * 2), (0, 0, 0, 0))
-        td = ImageDraw.Draw(tile)
-        S, r = PX(44), PX(17)
-        td.arc((S - r * 2, S + PX(4) - r * 2, S + r * 2, S + PX(4) + r * 2),
-               start=205, end=335, fill=glyph, width=PX(11))
-        for ang in (205, 335):
-            ex = S + r * 2 * math.cos(math.radians(ang))
-            ey = S + PX(4) + r * 2 * math.sin(math.radians(ang))
-            td.ellipse((ex - PX(9), ey - PX(9), ex + PX(9), ey + PX(9)), fill=glyph)
-        tile = tile.rotate(-32, resample=Image.BICUBIC).resize((PX(44), PX(44)), Image.LANCZOS)
-        layer.alpha_composite(tile, (int(cx - PX(22)), int(cy - PX(22))))
+        ic = glyph("📞", int(diam * 0.52), glyph_color)
+        if ic is not None:
+            layer.alpha_composite(ic, (cx - ic.width // 2, cy - ic.height // 2))
 
 
 def _transcribe_btn(d: ImageDraw.ImageDraw, x: int, y: int, accent) -> None:
@@ -588,11 +592,11 @@ def _draw_media_row(layer, d, msg: Msg, th: Theme, m: dict, text_color, time_col
     w, h = m["w"], m["h"]
     accent = (255, 255, 255, 255) if msg.out else th.header_accent
     circle_bg = (255, 255, 255, 235) if msg.out else (105, 180, 234, 255)
-    glyph = th.bubble_out[:3] + (255,) if msg.out else (255, 255, 255, 255)
+    glyph_color = th.bubble_out[:3] + (255,) if msg.out else (255, 255, 255, 255)
     cx, cy = PX(11) + PX(VOICE_PLAY_D) // 2, h // 2 if m["kind"] != "voice" else PX(33)
 
     if m["kind"] == "voice":
-        _play_circle(layer, d, cx, cy, PX(VOICE_PLAY_D), circle_bg, glyph, "play")
+        _play_circle(layer, d, cx, cy, PX(VOICE_PLAY_D), circle_bg, glyph_color, "play")
         x0 = PX(WAVE_X)
         x1 = w - PX(52)
         pitch = PX(WAVE_BAR + WAVE_GAP)
@@ -607,13 +611,13 @@ def _draw_media_row(layer, d, msg: Msg, th: Theme, m: dict, text_color, time_col
         d.text((x0, cy + PX(14)), msg.duration or "0:30", font=font(13, 500), fill=time_color)
         _transcribe_btn(d, w - PX(48), PX(14), accent)
     elif m["kind"] == "file":
-        _play_circle(layer, d, cx, cy, PX(VOICE_PLAY_D), circle_bg, glyph, "doc")
+        _play_circle(layer, d, cx, cy, PX(VOICE_PLAY_D), circle_bg, glyph_color, "doc")
         d.text((PX(WAVE_X + 11), PX(15)), msg.file_name or "document.pdf",
                font=font(16, 600), fill=text_color)
         d.text((PX(WAVE_X + 11), PX(38)), msg.file_size or "2,4 МБ",
                font=font(14), fill=time_color)
     else:  # звонок
-        _play_circle(layer, d, cx, cy, PX(VOICE_PLAY_D), circle_bg, glyph, "call")
+        _play_circle(layer, d, cx, cy, PX(VOICE_PLAY_D), circle_bg, glyph_color, "call")
         title = "Пропущенный звонок" if msg.call_missed else "Входящий звонок"
         d.text((PX(WAVE_X + 11), PX(12)), title, font=font(16, 600), fill=text_color)
         d.text((PX(WAVE_X + 11), PX(34)), msg.duration or "не отвечено",
@@ -966,15 +970,9 @@ def _input_bar(canvas: Image.Image, th: Theme) -> None:
     canvas.paste(strip, (0, top))
     d = ImageDraw.Draw(canvas)
     cy = top + PX(INPUT_H / 2)
-    # скрепка: наклонная петля с загнутым кончиком
-    clip = Image.new("RGBA", (PX(34), PX(34)), (0, 0, 0, 0))
-    cd = ImageDraw.Draw(clip)
-    cd.arc((PX(7), PX(2), PX(27), PX(22)), start=180, end=360, fill=th.input_text, width=PX(2))
-    cd.line((PX(7), PX(12), PX(7), PX(22)), fill=th.input_text, width=PX(2))
-    cd.line((PX(27), PX(12), PX(27), PX(24)), fill=th.input_text, width=PX(2))
-    cd.arc((PX(7), PX(16), PX(27), PX(32)), start=0, end=180, fill=th.input_text, width=PX(2))
-    canvas.alpha_composite(clip.rotate(-28, resample=Image.BICUBIC),
-                           (PX(13), int(cy - PX(17))))
+    clip = glyph("📎", PX(30), th.input_text)
+    if clip is not None:
+        canvas.alpha_composite(clip, (PX(14), int(cy - PX(15))))
     fx0, fx1 = PX(50), W - PX(46)
     fld, fd = overlay(canvas)
     fd.rounded_rectangle((fx0, cy - PX(18), fx1, cy + PX(18)), radius=PX(18), fill=th.input_bg)
