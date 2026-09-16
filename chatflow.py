@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import random
 from io import BytesIO
 from pathlib import Path
@@ -24,6 +25,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     BufferedInputFile,
     FSInputFile,
+    InputMediaPhoto,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -37,7 +39,7 @@ import chatgen
 
 router = Router(name="chatflow")
 
-BTN_CHAT = "💬 Переписка"
+BTN_CHAT = "💬 Создать фейк-переписку"
 SKIP = "chat:skip"
 
 # Текст обязан совпадать с BTN_CANCEL в bot.py: выход из сценария обрабатывает
@@ -98,15 +100,31 @@ def item_times(draft: dict) -> list:
     return out
 
 
+VISIBLE_ITEMS = 15      # длиннее список не влезет в лимит сообщения телеграма
+
+
 def describe(draft: dict) -> str:
-    """Текст конструктора: что уже набрано и кто пишет сейчас."""
+    """Панель конструктора. Размечена HTML: главное — кто сейчас говорит и как
+    это переключить, поэтому оно жирным. Имена и реплики экранируем, иначе
+    угловая скобка в тексте сломает разметку."""
+    e = html.escape
     who = draft["my_name"] if draft["speaker_out"] else draft["contact_name"]
-    lines = [f"переписка: {draft['contact_name']} и {draft['my_name']}", ""]
+    other = draft["contact_name"] if draft["speaker_out"] else draft["my_name"]
+    lines = [f"<b>Переписка:</b> {e(draft['contact_name'])} и {e(draft['my_name'])}"]
+
     if not draft["items"]:
-        lines.append("пока пусто. напиши первую реплику — она добавится сразу")
+        lines += ["", "пока пусто"]
     else:
+        pages = chatgen.page_count(_preview_msgs(draft), theme=draft["theme"])
+        lines.append(f"реплик: {len(draft['items'])} · выйдет "
+                     f"{pages} {'скрин' if pages == 1 else 'скрина' if pages < 5 else 'скринов'}")
+        lines.append("")
         times = item_times(draft)
-        for i, (it, t) in enumerate(zip(draft["items"], times), 1):
+        shown = list(enumerate(zip(draft["items"], times), 1))
+        if len(shown) > VISIBLE_ITEMS:
+            lines.append(f"…и ещё {len(shown) - VISIBLE_ITEMS} выше")
+            shown = shown[-VISIBLE_ITEMS:]
+        for i, (it, t) in shown:
             name = draft["my_name"] if it["out"] else draft["contact_name"]
             body = {
                 "text": it.get("text", ""),
@@ -115,13 +133,43 @@ def describe(draft: dict) -> str:
                 "videonote": f"⭕ кружок {it.get('duration', '')}",
                 "sticker": f"стикер {it.get('sticker', '')}",
                 "file": f"📎 файл: {it.get('file_name', '')}",
-                "call": "📞 " + ("пропущенный звонок" if it.get("call_missed") else "входящий звонок"),
+                "call": "📞 " + ("пропущенный звонок" if it.get("call_missed")
+                                 else "входящий звонок"),
             }.get(it["kind"], it["kind"])
-            mark = "↩️" if it.get("reply_to") is not None else ""
+            mark = "↩️ " if it.get("reply_to") is not None else ""
             react = f" {it['reaction']}" if it.get("reaction") else ""
-            lines.append(f"{i}. {mark}{name}: {body}{react}  ·{t}")
-    lines += ["", f"сейчас пишет: {who}", "пиши текст или кидай фото — добавится само"]
+            lines.append(f"{i}. {mark}<b>{e(name)}:</b> {e(str(body))}{react}  ·{t}")
+
+    lines += [
+        "",
+        f"<b>Сейчас пишет: {e(who)}</b>",
+        "Пиши текст или кидай фото — добавится сразу.",
+        # род собеседника неизвестен, поэтому без согласования глагола
+        f"<b>Переключить на {e(other)} — кнопка «🔄 сейчас пишет»</b>",
+    ]
     return "\n".join(lines)
+
+
+# одна заглушка на всех: реальные пропорции для счётчика не важны, а плодить
+# по картинке на каждое фото — лишние мегабайты
+_PLACEHOLDER = Image.new("RGB", (1000, 750))
+
+
+def _preview_msgs(draft: dict) -> list:
+    """Сообщения без картинок — только чтобы посчитать, на сколько экранов
+    разъедется переписка. Скачивать ради счётчика фото было бы расточительно."""
+    out = []
+    for it, t in zip(draft["items"], item_times(draft)):
+        out.append(chatgen.Msg(
+            text=it.get("text", ""), out=it["out"], time=t, kind=it["kind"],
+            duration=it.get("duration", ""), file_name=it.get("file_name", ""),
+            sticker=it.get("sticker", ""), reaction=it.get("reaction"),
+            reply_name="x" if it.get("reply_to") is not None else None,
+            reply_text="x" if it.get("reply_to") is not None else None,
+            date=it.get("date"),
+            photo=_PLACEHOLDER if it.get("photo") else None,
+        ))
+    return out
 
 
 def builder_kb(draft: dict) -> InlineKeyboardMarkup:
@@ -151,7 +199,7 @@ async def show_builder(message: Message, draft: dict, edit: bool = False,
     text, kb = describe(draft), builder_kb(draft)
     if edit:
         try:
-            await message.edit_text(text, reply_markup=kb)
+            await message.edit_text(text, reply_markup=kb, parse_mode="HTML")
             return
         except Exception:
             pass
@@ -163,7 +211,7 @@ async def show_builder(message: Message, draft: dict, edit: bool = False,
                 await message.bot.delete_message(message.chat.id, old_id)
             except Exception:
                 pass
-    sent = await message.answer(text, reply_markup=kb)
+    sent = await message.answer(text, reply_markup=kb, parse_mode="HTML")
     if state is not None:
         await state.update_data(builder_msg=sent.message_id)
 
@@ -218,13 +266,18 @@ async def build_messages(bot: Bot, draft: dict) -> list:
     return msgs
 
 
-async def render_draft(bot: Bot, draft: dict) -> BytesIO:
+MAX_PAGES = 10          # ровно столько картинок влезает в один альбом телеграма
+
+
+async def render_draft(bot: Bot, draft: dict) -> list:
+    """Готовые скрины. Длинная переписка сама разъезжается на несколько — так
+    же, как её скриншотил бы человек, листая чат."""
     msgs = await build_messages(bot, draft)
     avatar = await _img(bot, draft.get("contact_avatar"))
     # рисование синхронное и на слабом ядре занимает заметное время — уводим в
     # поток, иначе на время отрисовки бот замирает для всех остальных
     return await asyncio.to_thread(
-        chatgen.make_chat_screenshot, msgs,
+        chatgen.make_chat_pages, msgs, max_pages=MAX_PAGES,
         theme=draft["theme"], contact_name=draft["contact_name"] or "Контакт",
         subtitle="был(а) недавно", avatar=avatar,
         unread=random.Random(len(msgs)).randint(3, 900),
@@ -641,13 +694,24 @@ async def render(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
         return
     await callback.answer("рисую")
     try:
-        buf = await render_draft(bot, draft)
+        pages = await render_draft(bot, draft)
     except Exception:
         await callback.message.answer("не получилось собрать скрин, попробуй убрать последнее")
         raise
-    await callback.message.answer_photo(
-        BufferedInputFile(buf.read(), filename="chat.jpg"),
-        caption="мем-машина без вкуса и совести: @randomem_bot",
+
+    caption = "мем-машина без вкуса и совести: @randomem_bot"
+    if len(pages) == 1:
+        await callback.message.answer_photo(
+            BufferedInputFile(pages[0].read(), filename="chat.jpg"), caption=caption)
+    else:
+        # в альбоме подпись показывается только у первой картинки
+        media = [InputMediaPhoto(
+            media=BufferedInputFile(b.read(), filename=f"chat{i}.jpg"),
+            caption=caption if i == 0 else None)
+            for i, b in enumerate(pages)]
+        await callback.message.answer_media_group(media)
+    await callback.message.answer(
+        f"готово, {len(pages)} шт. листаются по порядку" if len(pages) > 1 else "готово",
         reply_markup=after_kb())
 
 
