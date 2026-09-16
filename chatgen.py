@@ -444,6 +444,61 @@ def snow_pattern(size, color) -> Image.Image:
     return layer
 
 
+def _doodle(d: ImageDraw.ImageDraw, cx: float, cy: float, r: float,
+            color, w: int, kind: int) -> None:
+    """Один значок из классических обоев телеграма. Рисуем контуром — заливка
+    на обоях читалась бы пятнами."""
+    if kind == 0:                                   # сердце
+        d.arc((cx - r, cy - r * 0.9, cx, cy + r * 0.1), 160, 360, fill=color, width=w)
+        d.arc((cx, cy - r * 0.9, cx + r, cy + r * 0.1), 180, 20, fill=color, width=w)
+        d.line((cx - r * 0.93, cy - r * 0.32, cx, cy + r), fill=color, width=w)
+        d.line((cx + r * 0.93, cy - r * 0.32, cx, cy + r), fill=color, width=w)
+    elif kind == 1:                                 # звезда
+        pts = []
+        for i in range(10):
+            a = math.pi / 5 * i - math.pi / 2
+            rr = r if i % 2 == 0 else r * 0.45
+            pts.append((cx + rr * math.cos(a), cy + rr * math.sin(a)))
+        d.polygon(pts, outline=color, width=w)
+    elif kind == 2:                                 # кружок
+        d.ellipse((cx - r, cy - r, cx + r, cy + r), outline=color, width=w)
+    elif kind == 3:                                 # облако
+        d.arc((cx - r, cy - r * 0.2, cx + r * 0.2, cy + r), 180, 350, fill=color, width=w)
+        d.arc((cx - r * 0.3, cy - r * 0.8, cx + r, cy + r * 0.6), 200, 20, fill=color, width=w)
+        d.line((cx - r * 0.85, cy + r * 0.45, cx + r * 0.8, cy + r * 0.45), fill=color, width=w)
+    elif kind == 4:                                 # нота
+        d.ellipse((cx - r, cy + r * 0.2, cx - r * 0.2, cy + r), outline=color, width=w)
+        d.line((cx - r * 0.2, cy + r * 0.6, cx - r * 0.2, cy - r), fill=color, width=w)
+        d.line((cx - r * 0.2, cy - r, cx + r * 0.7, cy - r * 0.7), fill=color, width=w)
+    elif kind == 5:                                 # капля
+        d.arc((cx - r * 0.8, cy - r * 0.3, cx + r * 0.8, cy + r), 0, 180, fill=color, width=w)
+        d.line((cx - r * 0.8, cy + r * 0.35, cx, cy - r), fill=color, width=w)
+        d.line((cx + r * 0.8, cy + r * 0.35, cx, cy - r), fill=color, width=w)
+    elif kind == 6:                                 # ромб
+        d.polygon([(cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy)],
+                  outline=color, width=w)
+    else:                                           # спираль
+        for k in range(3):
+            rr = r * (0.35 + k * 0.32)
+            d.arc((cx - rr, cy - rr, cx + rr, cy + rr), 30 + k * 40, 300 + k * 40,
+                  fill=color, width=w)
+
+
+def doodle_pattern(size, color) -> Image.Image:
+    """Обои «в дудлах»: мелкие значки вразнобой, как в стандартной теме."""
+    layer = Image.new("RGBA", size, (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    rnd = random.Random(11)
+    w = max(1, PX(1.1))
+    step = PX(62)
+    for row, y in enumerate(range(-step, size[1] + step, step)):
+        for x in range(-step, size[0] + step, step):
+            ox = x + (step // 2 if row % 2 else 0) + rnd.randint(-PX(8), PX(8))
+            oy = y + rnd.randint(-PX(8), PX(8))
+            _doodle(d, ox, oy, PX(rnd.choice((9, 11, 13))), color, w, rnd.randint(0, 7))
+    return layer
+
+
 # ---------- темы ----------
 
 @dataclass
@@ -473,6 +528,11 @@ class Theme:
     input_text: tuple = (140, 140, 148, 255)
     bar_bg: tuple = (20, 20, 22, 245)
     status_text: tuple = (255, 255, 255, 255)
+    quote_bg: tuple = (255, 255, 255, 26)    # подложка цитаты внутри пузыря
+    chip_out: tuple = (255, 255, 255, 45)    # чип реакции на своём пузыре
+    wave_out: tuple = (255, 255, 255, 190)   # волна голосового, своё
+    wave_in: tuple = (94, 138, 170, 255)     # волна голосового, входящее
+    media_circle: tuple = (105, 180, 234, 255)   # круг play/файла/звонка
     font_pt: float = 17.0             # кегль текста сообщения
     max_bubble: float = 0.78          # доля ширины экрана
     dark: bool = True
@@ -507,6 +567,39 @@ THEMES = {
         max_bubble=0.795,
     ),
 }
+
+# Светлая классика — общая основа для всех светлых тем: меняется только фон.
+_LIGHT = dict(
+    pattern="doodle", pattern_color=(255, 255, 255, 130),
+    bubble_in=(255, 255, 255, 255), bubble_out=(225, 253, 199, 255),
+    text_in=(0, 0, 0, 255), text_out=(0, 0, 0, 255),
+    time_in=(0, 0, 0, 95), time_out=(76, 154, 58, 230),
+    tick=(79, 174, 78, 255), link=(0, 122, 255, 255),
+    header_bg=(247, 247, 250, 225), header_text=(0, 0, 0, 255),
+    header_sub=(126, 126, 134, 255), header_accent=(0, 122, 255, 255),
+    reply_line=(0, 122, 255, 255), reply_name=(0, 122, 255, 255),
+    quote_bg=(0, 0, 0, 20), chip_out=(0, 0, 0, 22),
+    wave_out=(108, 176, 88, 230), wave_in=(0, 122, 255, 200),
+    media_circle=(0, 122, 255, 255),
+    input_bg=(255, 255, 255, 245), input_text=(150, 150, 156, 255),
+    bar_bg=(247, 247, 250, 240), status_text=(0, 0, 0, 255),
+    dark=False, font_pt=17.6, max_bubble=0.795,
+)
+
+THEMES.update({
+    "light": Theme(key="light", title="светлая классика",
+                   wallpaper=((226, 233, 238), (219, 228, 234),
+                              (223, 231, 237), (214, 224, 231)), **_LIGHT),
+    "grad_sea": Theme(key="grad_sea", title="бирюзовый градиент",
+                      wallpaper=((126, 214, 198), (108, 190, 214),
+                                 (146, 220, 176), (104, 186, 208)), **_LIGHT),
+    "grad_sunset": Theme(key="grad_sunset", title="закат",
+                         wallpaper=((246, 182, 128), (240, 146, 148),
+                                    (248, 204, 148), (232, 140, 164)), **_LIGHT),
+    "grad_violet": Theme(key="grad_violet", title="сиреневый градиент",
+                         wallpaper=((176, 154, 224), (146, 156, 226),
+                                    (198, 160, 218), (138, 148, 220)), **_LIGHT),
+})
 
 
 # ---------- модель сообщения ----------
@@ -716,10 +809,9 @@ def _play_circle(layer: Image.Image, d: ImageDraw.ImageDraw, cx: int, cy: int,
             layer.alpha_composite(ic, (cx - ic.width // 2, cy - ic.height // 2))
 
 
-def _transcribe_btn(d: ImageDraw.ImageDraw, x: int, y: int, accent) -> None:
+def _transcribe_btn(d: ImageDraw.ImageDraw, x: int, y: int, accent, bg) -> None:
     """Кнопка «расшифровать в текст» — стрелка и буква A в скруглённом поле."""
-    d.rounded_rectangle((x, y, x + PX(40), y + PX(34)), radius=PX(9),
-                        fill=(255, 255, 255, 30))
+    d.rounded_rectangle((x, y, x + PX(40), y + PX(34)), radius=PX(9), fill=bg)
     d.line((x + PX(9), y + PX(17), x + PX(18), y + PX(17)), fill=accent, width=PX(2))
     d.polygon([(x + PX(18), y + PX(13)), (x + PX(22), y + PX(17)), (x + PX(18), y + PX(21))],
               fill=accent)
@@ -734,7 +826,7 @@ def _reaction_chip(layer: Image.Image, d: ImageDraw.ImageDraw, msg: Msg, th: The
     tail_w = ew if solo else int(font(14, 600).getlength(str(msg.reaction_count)))
     cw = PX(9) + ew + PX(5) + tail_w + PX(9)
     d.rounded_rectangle((x, y, x + cw, y + PX(REACT_H)), radius=PX(REACT_H / 2),
-                        fill=(255, 255, 255, 45) if msg.out else th.header_accent[:3] + (80,))
+                        fill=th.chip_out if msg.out else th.header_accent[:3] + (80,))
     em = render_emoji(msg.reaction, int(ew))
     if em is not None:
         layer.alpha_composite(em, (x + PX(9), int(y + (PX(REACT_H) - ew) / 2)))
@@ -751,7 +843,7 @@ def _reaction_chip(layer: Image.Image, d: ImageDraw.ImageDraw, msg: Msg, th: The
 def _draw_media_row(layer, d, msg: Msg, th: Theme, m: dict, text_color, time_color, ft) -> None:
     w, h = m["w"], m["h"]
     accent = (255, 255, 255, 255) if msg.out else th.header_accent
-    circle_bg = (255, 255, 255, 235) if msg.out else (105, 180, 234, 255)
+    circle_bg = (255, 255, 255, 235) if msg.out else th.media_circle
     glyph_color = th.bubble_out[:3] + (255,) if msg.out else (255, 255, 255, 255)
     # иконку центрируем по содержимому, а не по всему пузырю: с реакцией он
     # выше, и круг уезжал вниз, налезая на чип
@@ -765,7 +857,7 @@ def _draw_media_row(layer, d, msg: Msg, th: Theme, m: dict, text_color, time_col
         x1 = w - PX(52)
         pitch = PX(WAVE_BAR + WAVE_GAP)
         n = max(4, int((x1 - x0) / pitch))
-        wave_col = (255, 255, 255, 190) if msg.out else (94, 138, 170, 255)
+        wave_col = th.wave_out if msg.out else th.wave_in
         mid = cy
         for i, k in enumerate(_wave_heights(msg.duration + msg.time, n)):
             bh = max(PX(1.5), int(PX(WAVE_MAX_H) * k / 2))
@@ -773,7 +865,7 @@ def _draw_media_row(layer, d, msg: Msg, th: Theme, m: dict, text_color, time_col
             d.rounded_rectangle((bx, mid - bh, bx + PX(WAVE_BAR), mid + bh),
                                 radius=PX(WAVE_BAR / 2), fill=wave_col)
         d.text((x0, cy + PX(14)), msg.duration or "0:30", font=font(13, 500), fill=time_color)
-        _transcribe_btn(d, w - PX(48), PX(14), accent)
+        _transcribe_btn(d, w - PX(48), PX(14), accent, th.quote_bg)
     elif m["kind"] == "file":
         _play_circle(layer, d, cx, cy, PX(VOICE_PLAY_D), circle_bg, glyph_color, "doc")
         d.text((PX(WAVE_X + 11), PX(15)), msg.file_name or "document.pdf",
@@ -825,7 +917,7 @@ def _draw_bare(canvas: Image.Image, msg: Msg, th: Theme, m: dict, x: int, y: int
                   fill=(255, 255, 255, 235))
         d.line((mx + PX(5), my - PX(5), mx + PX(13), my + PX(5)), fill=(255, 255, 255, 235), width=PX(2))
         d.line((mx + PX(13), my - PX(5), mx + PX(5), my + PX(5)), fill=(255, 255, 255, 235), width=PX(2))
-        _transcribe_btn(d, D + PX(14), D - PX(78), th.header_accent)
+        _transcribe_btn(d, D + PX(14), D - PX(78), th.header_accent, th.quote_bg)
         d.text((D + PX(66), D - PX(68)), msg.time, font=ft, fill=(255, 255, 255, 200))
     else:  # стикер
         em = render_emoji(msg.sticker or "🙂", D)
@@ -897,7 +989,7 @@ def _draw_bubble(canvas: Image.Image, msg: Msg, th: Theme, m: dict,
         rx, ry = PX(PAD_X), cy
         rw = w - PX(PAD_X) * 2
         d.rounded_rectangle((rx, ry, rx + rw, ry + PX(REPLY_H)), radius=PX(4),
-                            fill=(255, 255, 255, 26))
+                            fill=th.quote_bg)
         d.rounded_rectangle((rx, ry, rx + PX(3), ry + PX(REPLY_H)), radius=PX(1.5),
                             fill=th.reply_line)
         d.text((rx + PX(9), ry + PX(4)), msg.reply_name, font=font(14, 600), fill=th.reply_name)
@@ -1226,6 +1318,8 @@ def make_chat_screenshot(messages: Sequence[Msg], *, theme: str = "ios_dark",
     canvas = mesh_gradient((W, H), th.wallpaper).convert("RGBA")
     if th.pattern == "snow":
         canvas.alpha_composite(snow_pattern((W, H), th.pattern_color))
+    elif th.pattern == "doodle":
+        canvas.alpha_composite(doodle_pattern((W, H), th.pattern_color))
 
     grad = None
     if th.bubble_out_grad:

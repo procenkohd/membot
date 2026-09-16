@@ -280,7 +280,9 @@ async def render_draft(bot: Bot, draft: dict) -> list:
         chatgen.make_chat_pages, msgs, max_pages=MAX_PAGES,
         theme=draft["theme"], contact_name=draft["contact_name"] or "Контакт",
         subtitle="был(а) недавно", avatar=avatar,
-        unread=random.Random(len(msgs)).randint(3, 900),
+        # без сида: иначе при одинаковом числе реплик счётчик повторяется
+        unread=random.choice((None, random.randint(1, 12), random.randint(13, 400),
+                              random.randint(400, 9999))),
         clock=draft["start"],
     )
 
@@ -356,8 +358,12 @@ async def _ask_theme(message: Message, state: FSMContext) -> None:
     «о чём переписка», а не «как она выглядит»."""
     await state.set_state(ChatStates.settings)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1 — обычная тёмная", callback_data="chat:theme:ios_dark")],
-        [InlineKeyboardButton(text="2 — чёрная с узором", callback_data="chat:theme:ios_teal")],
+        [InlineKeyboardButton(text="1 — тёмная", callback_data="chat:theme:ios_dark"),
+         InlineKeyboardButton(text="2 — с узором", callback_data="chat:theme:ios_teal"),
+         InlineKeyboardButton(text="3 — светлая", callback_data="chat:theme:light")],
+        [InlineKeyboardButton(text="4 — бирюзовый", callback_data="chat:theme:grad_sea"),
+         InlineKeyboardButton(text="5 — закат", callback_data="chat:theme:grad_sunset"),
+         InlineKeyboardButton(text="6 — сиреневый", callback_data="chat:theme:grad_violet")],
     ])
     caption = "как должен выглядеть чат? выбери вариант с картинки"
     if THEME_PREVIEW.exists():
