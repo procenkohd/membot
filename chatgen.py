@@ -515,7 +515,7 @@ class Theme:
     text_out: tuple = (255, 255, 255, 255)
     time_in: tuple = (255, 255, 255, 110)
     time_out: tuple = (255, 255, 255, 170)
-    tick: tuple = (255, 255, 255, 220)
+    tick: tuple = (255, 255, 255, 242)
     link: tuple = (110, 190, 255, 255)
     header_bg: tuple = (26, 26, 28, 225)
     header_text: tuple = (255, 255, 255, 255)
@@ -639,8 +639,15 @@ MAX_BUBBLE = 0.795 * SCREEN_W_PT
 EDGE = 10
 GAP_SAME, GAP_DIFF = 2.5, 7
 TIME_PT = 11.2
-TIME_GAP = 8.2
-TICK_W = 11
+TIME_GAP = 4.7   # подобрано так, чтобы суммарная константа осталась 62.2pt
+# Галочки прочтения. Геометрия снята пипеткой с оригинала: блок 13.3x7.4pt,
+# вторая галочка рисуется ОДНОЙ чертой — её короткий хвостик у Apple спрятан
+# под длинной чертой первой. Если рисовать обе целиком, выходит «W».
+TICK_BLOCK_W, TICK_BLOCK_H = 13.4, 7.6
+TICK_LINE = 1.1
+TICK_GAP = 3.5        # от конца времени до начала галочек
+TICK_INSET = 7.7      # от галочек до правого края пузыря
+TICK_W = TICK_GAP + TICK_BLOCK_W + TICK_INSET - PAD_X
 PHOTO_MAX = 250
 # голосовое: пузырь 70pt, кружок play 44pt, волна из палок 2.3pt с зазором 2.1pt
 VOICE_H = 70
@@ -655,37 +662,23 @@ REACT_H = 30
 FWD_H = 41
 
 
-def _tick(d: ImageDraw.ImageDraw, x: int, y: int, color, double: bool) -> None:
-    """Галочки прочтения: одна или две внахлёст."""
-    w = max(1, PX(1.4))
-    s = PX(4.5)
-    def one(ox):
-        d.line((ox, y + s * 0.55, ox + s * 0.62, y + s * 1.15), fill=color, width=w)
-        d.line((ox + s * 0.62, y + s * 1.15, ox + s * 1.85, y - s * 0.28), fill=color, width=w)
-    one(x)
+def _tick(layer: Image.Image, x: int, y: int, color, double: bool) -> None:
+    """Галочки прочтения. Рисуются в увеличенном размере и уменьшаются: без
+    этого тонкие диагонали идут лесенкой, и вблизи это сразу видно."""
+    ss = 4
+    W, H = PX(TICK_BLOCK_W) * ss, PX(TICK_BLOCK_H) * ss
+    tile = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(tile)
+    lw = max(1, int(PX(TICK_LINE) * ss))
+
+    def pt(px_: float, py_: float) -> tuple:
+        return int(PX(px_) * ss), int(PX(py_) * ss)
+
+    d.line([pt(0.2, 4.2), pt(3.3, 7.2), pt(10.2, 0.4)], fill=color, width=lw, joint="curve")
     if double:
-        one(x + PX(4.2))
-
-
-def _dur_seconds(text: str) -> int:
-    try:
-        m, sec = text.split(":")
-        return int(m) * 60 + int(sec)
-    except Exception:
-        return 30
-
-
-def _wave_heights(seed: str, n: int) -> list:
-    """Форма волны у голосового — псевдослучайная, но стабильная для одного
-    сообщения: иначе при перерисовке картинка «дёргалась» бы."""
-    rnd = random.Random(seed)
-    out = []
-    for i in range(n):
-        # две синусоиды разной частоты дают «речевой» рисунок с паузами,
-        # чистый рандом выглядит как ровная щётка
-        env = 0.45 + 0.55 * abs(math.sin(i / 7.3)) * abs(math.cos(i / 17.1 + 0.7))
-        out.append(max(0.07, min(1.0, env * rnd.uniform(0.25, 1.25))))
-    return out
+        d.line([pt(6.5, 7.2), pt(13.2, 0.4)], fill=color, width=lw)
+    layer.alpha_composite(tile.resize((PX(TICK_BLOCK_W), PX(TICK_BLOCK_H)), Image.LANCZOS),
+                          (int(x), int(y)))
 
 
 def _measure(msg: Msg, th: Theme) -> dict:
@@ -887,7 +880,7 @@ def _draw_media_row(layer, d, msg: Msg, th: Theme, m: dict, text_color, time_col
     ty = h - PX(22)
     d.text((tx, ty), msg.time, font=ft, fill=time_color)
     if msg.out:
-        _tick(d, tx + tw + PX(4), ty + PX(4), th.tick, msg.read)
+        _tick(layer, tx + tw + PX(TICK_GAP), ty + PX(3.0), th.tick, msg.read)
 
 
 def _draw_bare(canvas: Image.Image, msg: Msg, th: Theme, m: dict, x: int, y: int) -> None:
@@ -1026,7 +1019,9 @@ def _draw_bubble(canvas: Image.Image, msg: Msg, th: Theme, m: dict,
                             radius=PX(10), fill=(0, 0, 0, 90))
         time_color = (255, 255, 255, 235)
     elif m["time_inline"]:
-        ty = cy - m["line_h"] + PX(th.font_pt * 0.28)
+        # время и галочки прижаты к базовой линии текста, а не к его середине:
+        # коэффициент выведен из оригинала (галочки на 17.7pt от верха пузыря)
+        ty = cy - m["line_h"] + PX(th.font_pt * 0.536)
     else:
         ty = cy
         cy += PX(TIME_PT * 1.2)
@@ -1037,7 +1032,7 @@ def _draw_bubble(canvas: Image.Image, msg: Msg, th: Theme, m: dict,
         d.text((ex + PX(17), ty), str(msg.views), font=ft, fill=time_color)
     d.text((tx, ty), msg.time, font=ft, fill=time_color)
     if msg.out:
-        _tick(d, tx + tw + PX(4), ty + PX(4), th.tick, msg.read)
+        _tick(layer, tx + tw + PX(TICK_GAP), ty + PX(3.0), th.tick, msg.read)
 
     canvas.alpha_composite(layer, (x, y))
 
