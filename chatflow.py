@@ -60,6 +60,8 @@ class ChatStates(StatesGroup):
     wait_photo_for = State()    # ждём фото для кружка
     wait_sticker = State()      # ждём эмодзи для стикера
     wait_file_name = State()    # ждём название файла
+    member_name = State()       # ждём имя очередного участника группы
+    member_avatar = State()     # ждём его аватарку
 
 
 # ---------- черновик ----------
@@ -69,10 +71,39 @@ def blank_draft() -> dict:
         "contact_name": "", "contact_avatar": None,
         "my_name": "", "my_avatar": None,
         "theme": "ios_teal", "start": "12:00", "step": 60,
-        "speaker_out": False,      # False — пишет собеседник (слева)
+        # группа: участники кроме тебя и кто сейчас говорит (-1 — ты)
+        "kind": "duo",
+        "members": [],
+        "speaker": -1,
+        "speaker_out": False,      # False — пишет собеседник; только для duo
         "reply_next": False,       # следующая реплика будет ответом на предыдущую
         "items": [],
     }
+
+
+def is_group(draft: dict) -> bool:
+    return draft.get("kind") == "group"
+
+
+def sender_name(draft: dict, idx: int) -> str:
+    """-1 — сам пользователь, остальное — индекс в списке участников."""
+    if idx < 0:
+        return draft["my_name"]
+    members = draft.get("members") or []
+    return members[idx]["name"] if idx < len(members) else "?"
+
+
+def item_sender(draft: dict, item: dict) -> int:
+    """Кто автор реплики. В переписке на двоих индекса нет, там решает out."""
+    if "sender" in item:
+        return item["sender"]
+    return -1 if item.get("out") else 0
+
+
+def current_speaker(draft: dict) -> str:
+    if is_group(draft):
+        return sender_name(draft, draft.get("speaker", -1))
+    return draft["my_name"] if draft["speaker_out"] else draft["contact_name"]
 
 
 def _hhmm(minutes: int) -> str:
@@ -109,8 +140,12 @@ def describe(draft: dict) -> str:
     это переключить, поэтому оно жирным. Имена и реплики экранируем, иначе
     угловая скобка в тексте сломает разметку."""
     e = html.escape
-    who = draft["my_name"] if draft["speaker_out"] else draft["contact_name"]
-    lines = [f"<b>Переписка:</b> {e(draft['contact_name'])} и {e(draft['my_name'])}"]
+    who = current_speaker(draft)
+    if is_group(draft):
+        head = ", ".join([draft["my_name"]] + [m["name"] for m in draft.get("members", [])])
+        lines = [f"<b>Группа «{e(draft['contact_name'])}»:</b> {e(head)}"]
+    else:
+        lines = [f"<b>Переписка:</b> {e(draft['contact_name'])} и {e(draft['my_name'])}"]
 
     if not draft["items"]:
         lines += ["", "пока пусто"]
@@ -125,7 +160,7 @@ def describe(draft: dict) -> str:
             lines.append(f"…и ещё {len(shown) - VISIBLE_ITEMS} выше")
             shown = shown[-VISIBLE_ITEMS:]
         for i, (it, t) in shown:
-            name = draft["my_name"] if it["out"] else draft["contact_name"]
+            name = sender_name(draft, item_sender(draft, it))
             body = {
                 "text": it.get("text", ""),
                 "photo": "🖼 фото" + (f": {it['text']}" if it.get("text") else ""),
@@ -146,7 +181,8 @@ def describe(draft: dict) -> str:
         "Пиши текст или кидай фото — добавится сразу.",
         # имена не склоняем и род не угадываем: подставленное имя в падеже
         # звучало бы коряво почти всегда
-        "<b>Чтобы говорил другой — жми «🔄 сейчас пишет»</b>",
+        ("<b>Чтобы говорил другой — ткни в его имя кнопкой выше</b>" if is_group(draft)
+         else "<b>Чтобы говорил другой — жми «🔄 сейчас пишет»</b>"),
     ]
     return "\n".join(lines)
 
@@ -165,6 +201,8 @@ def _preview_msgs(draft: dict) -> list:
             text=it.get("text", ""), out=it["out"], time=t, kind=it["kind"],
             duration=it.get("duration", ""), file_name=it.get("file_name", ""),
             sticker=it.get("sticker", ""), reaction=it.get("reaction"),
+            sender=(sender_name(draft, item_sender(draft, it))
+                    if (is_group(draft) and item_sender(draft, it) >= 0) else None),
             reply_name="x" if it.get("reply_to") is not None else None,
             reply_text="x" if it.get("reply_to") is not None else None,
             date=it.get("date"),
@@ -174,10 +212,19 @@ def _preview_msgs(draft: dict) -> list:
 
 
 def builder_kb(draft: dict) -> InlineKeyboardMarkup:
-    who = draft["my_name"] if draft["speaker_out"] else draft["contact_name"]
     reply_mark = "✅" if draft["reply_next"] else "↩️"
-    rows = [
-        [InlineKeyboardButton(text=f"🔄 сейчас пишет: {who}", callback_data="chat:swap")],
+    if is_group(draft):
+        # в группе вместо переключателя — список участников, текущий с точкой
+        people = [(-1, draft["my_name"])]
+        people += [(i, m["name"]) for i, m in enumerate(draft.get("members", []))]
+        cur = draft.get("speaker", -1)
+        rows = [[InlineKeyboardButton(
+            text=("● " if i == cur else "") + name[:16], callback_data=f"chat:who:{i}")
+            for i, name in people[k:k + 3]] for k in range(0, len(people), 3)]
+    else:
+        rows = [[InlineKeyboardButton(
+            text=f"🔄 сейчас пишет: {current_speaker(draft)}", callback_data="chat:swap")]]
+    rows += [
         [InlineKeyboardButton(text="🎤 голосовое", callback_data="chat:add:voice"),
          InlineKeyboardButton(text="⭕ кружок", callback_data="chat:add:videonote")],
         [InlineKeyboardButton(text="😀 стикер", callback_data="chat:add:sticker"),
@@ -244,8 +291,19 @@ async def build_messages(bot: Bot, draft: dict) -> list:
         reply_name = reply_text = None
         if it.get("reply_to") is not None:
             src = draft["items"][it["reply_to"]]
-            reply_name = draft["my_name"] if src["out"] else draft["contact_name"]
+            reply_name = sender_name(draft, item_sender(draft, src))
             reply_text = src.get("text") or REPLY_LABELS.get(src["kind"], "Сообщение")
+        # аватарка автора реплики — в группе она рисуется слева от пузыря
+        sender_idx = item_sender(draft, it)
+        sender_ava = None
+        if is_group(draft) and sender_idx >= 0:
+            members = draft.get("members", [])
+            fid = members[sender_idx].get("avatar") if sender_idx < len(members) else None
+            if fid:
+                if fid not in cache:
+                    cache[fid] = await _img(bot, fid)
+                sender_ava = cache[fid]
+
         # реакцию ставит «другая сторона», поэтому и аватарка её
         reactor_photo = None
         if it.get("reaction"):
@@ -261,12 +319,17 @@ async def build_messages(bot: Bot, draft: dict) -> list:
             file_name=it.get("file_name", ""), file_size=it.get("file_size", ""),
             call_missed=bool(it.get("call_missed")), sticker=it.get("sticker", ""),
             reaction=it.get("reaction"), reactor_photo=reactor_photo,
+            sender=(sender_name(draft, sender_idx)
+                    if (is_group(draft) and sender_idx >= 0) else None),
+            sender_color=sender_idx if sender_idx >= 0 else 0,
+            avatar=sender_ava,
             reply_name=reply_name, reply_text=reply_text,
             date=it.get("date"),
         ))
     return msgs
 
 
+MAX_MEMBERS = 6     # больше в палитре имён всё равно нет цветов
 MAX_PAGES = 10          # ровно столько картинок влезает в один альбом телеграма
 
 
@@ -277,10 +340,13 @@ async def render_draft(bot: Bot, draft: dict) -> list:
     avatar = await _img(bot, draft.get("contact_avatar"))
     # рисование синхронное и на слабом ядре занимает заметное время — уводим в
     # поток, иначе на время отрисовки бот замирает для всех остальных
+    group = is_group(draft)
+    subtitle = (f"{len(draft.get('members', [])) + 1} участника, 2 в сети"
+                if group else "был(а) недавно")
     return await asyncio.to_thread(
-        chatgen.make_chat_pages, msgs, max_pages=MAX_PAGES,
+        chatgen.make_chat_pages, msgs, max_pages=MAX_PAGES, group=group,
         theme=draft["theme"], contact_name=draft["contact_name"] or "Контакт",
-        subtitle="был(а) недавно", avatar=avatar,
+        subtitle=subtitle, avatar=avatar,
         # без сида: иначе при одинаковом числе реплик счётчик повторяется
         unread=random.choice((None, random.randint(1, 12), random.randint(13, 400),
                               random.randint(400, 9999))),
@@ -295,14 +361,33 @@ def skip_kb(text: str = "пропустить") -> InlineKeyboardMarkup:
         inline_keyboard=[[InlineKeyboardButton(text=text, callback_data=SKIP)]])
 
 
+def mode_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 на двоих", callback_data="chat:mode:duo")],
+        [InlineKeyboardButton(text="👥 групповой чат", callback_data="chat:mode:group")],
+    ])
+
+
 @router.message(F.text == BTN_CHAT)
 async def chat_start(message: Message, state: FSMContext) -> None:
-    await state.set_state(ChatStates.contact_name)
+    await state.set_state(ChatStates.settings)
     await state.update_data(draft=blank_draft())
-    await message.answer(
-        "делаем переписку. я проведу по шагам\n\n"
-        "как зовут собеседника? это имя будет в шапке чата",
-        reply_markup=cancel_kb)
+    await message.answer("делаем переписку. я проведу по шагам", reply_markup=cancel_kb)
+    await message.answer("какой чат рисуем?", reply_markup=mode_kb())
+
+
+@router.callback_query(F.data.startswith("chat:mode:"))
+async def pick_mode(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    draft = data.get("draft") or blank_draft()
+    draft["kind"] = callback.data.split(":")[2]
+    await state.update_data(draft=draft)
+    await state.set_state(ChatStates.contact_name)
+    await callback.answer()
+    ask = ("как называется группа? это увидишь в шапке чата"
+           if is_group(draft) else
+           "как зовут собеседника? это имя будет в шапке чата")
+    await callback.message.edit_text(ask)
 
 
 @router.message(ChatStates.contact_name, F.text)
@@ -312,7 +397,8 @@ async def got_contact_name(message: Message, state: FSMContext) -> None:
     draft["contact_name"] = message.text.strip()[:40]
     await state.update_data(draft=draft)
     await state.set_state(ChatStates.contact_avatar)
-    await message.answer(f"есть. теперь пришли фото для аватарки «{draft['contact_name']}»",
+    what = "группы" if is_group(draft) else ""
+    await message.answer(f"есть. пришли фото для аватарки {what} «{draft['contact_name']}»",
                          reply_markup=skip_kb("без аватарки"))
 
 
@@ -348,7 +434,72 @@ async def got_my_avatar(message: Message, state: FSMContext) -> None:
     draft = data["draft"]
     draft["my_avatar"] = message.photo[-1].file_id
     await state.update_data(draft=draft)
-    await _ask_theme(message, state)
+    await _after_me(message, state, draft)
+
+
+async def _after_me(message: Message, state: FSMContext, draft: dict) -> None:
+    if is_group(draft):
+        await _ask_member(message, state, draft)
+    else:
+        await _ask_theme(message, state)
+
+
+async def _ask_member(message: Message, state: FSMContext, draft: dict) -> None:
+    await state.set_state(ChatStates.member_name)
+    n = len(draft.get("members", [])) + 1
+    await message.answer(f"как зовут участника №{n}?")
+
+
+@router.message(ChatStates.member_name, F.text)
+async def got_member_name(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    draft = data["draft"]
+    draft.setdefault("members", []).append(
+        {"name": message.text.strip()[:40], "avatar": None})
+    await state.update_data(draft=draft)
+    await state.set_state(ChatStates.member_avatar)
+    await message.answer(f"аватарка для «{draft['members'][-1]['name']}»?",
+                         reply_markup=skip_kb("без аватарки"))
+
+
+@router.message(ChatStates.member_avatar, F.photo)
+async def got_member_avatar(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    draft = data["draft"]
+    draft["members"][-1]["avatar"] = message.photo[-1].file_id
+    await state.update_data(draft=draft)
+    await _ask_more_members(message, state, draft)
+
+
+async def _ask_more_members(message: Message, state: FSMContext, draft: dict) -> None:
+    names = ", ".join(m["name"] for m in draft["members"])
+    if len(draft["members"]) >= MAX_MEMBERS:
+        await message.answer(f"участники: {names}. больше не влезет, идём дальше")
+        await _ask_theme(message, state)
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="➕ ещё участник", callback_data="chat:member:more"),
+        InlineKeyboardButton(text="хватит", callback_data="chat:member:done"),
+    ]])
+    await message.answer(f"в группе: {draft['my_name']}, {names}", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("chat:member:"))
+async def more_members(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    draft = data.get("draft")
+    if draft is None:
+        await callback.answer("переписка потерялась, начни заново", show_alert=True)
+        return
+    await callback.answer()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    if callback.data.endswith("more"):
+        await _ask_member(callback.message, state, draft)
+    else:
+        await _ask_theme(callback.message, state)
 
 
 THEME_PREVIEW = Path(__file__).parent / "assets" / "theme_preview.jpg"
@@ -384,7 +535,11 @@ async def skip_step(callback: CallbackQuery, state: FSMContext) -> None:
     if cur == ChatStates.contact_avatar.state:
         await _ask_my_name(callback.message, state)
     elif cur == ChatStates.my_avatar.state:
-        await _ask_theme(callback.message, state)
+        data = await state.get_data()
+        await _after_me(callback.message, state, data["draft"])
+    elif cur == ChatStates.member_avatar.state:
+        data = await state.get_data()
+        await _ask_more_members(callback.message, state, data["draft"])
     elif cur == ChatStates.wait_photo_for.state:
         await _finish_videonote(callback.message, state, None)
 
@@ -461,7 +616,11 @@ POPULAR = ("😁", "😭", "💀", "🔥", "❤️", "👍", "🤡", "🗿")
 
 def _add(draft: dict, **fields) -> None:
     """Добавляет элемент от текущего говорящего и гасит разовые флаги."""
-    item = {"kind": "text", "out": draft["speaker_out"], **fields}
+    if is_group(draft):
+        who = draft.get("speaker", -1)
+        item = {"kind": "text", "out": who < 0, "sender": who, **fields}
+    else:
+        item = {"kind": "text", "out": draft["speaker_out"], **fields}
     if draft.get("reply_next") and draft["items"]:
         item["reply_to"] = len(draft["items"]) - 1
         draft["reply_next"] = False
@@ -499,6 +658,16 @@ async def swap_speaker(callback: CallbackQuery, state: FSMContext) -> None:
     draft["speaker_out"] = not draft["speaker_out"]
     await state.update_data(draft=draft)
     await callback.answer()
+    await show_builder(callback.message, draft, edit=True)
+
+
+@router.callback_query(ChatStates.builder, F.data.startswith("chat:who:"))
+async def pick_speaker(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    draft = data["draft"]
+    draft["speaker"] = int(callback.data.split(":")[2])
+    await state.update_data(draft=draft)
+    await callback.answer(f"пишет {current_speaker(draft)}")
     await show_builder(callback.message, draft, edit=True)
 
 
@@ -739,7 +908,7 @@ async def render_more(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "chat:new")
 async def render_new(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(ChatStates.contact_name)
+    await state.set_state(ChatStates.settings)
     await state.update_data(draft=blank_draft())
     await callback.answer()
-    await callback.message.answer("погнали заново. как зовут собеседника?")
+    await callback.message.answer("погнали заново. какой чат рисуем?", reply_markup=mode_kb())

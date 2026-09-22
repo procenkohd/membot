@@ -15,7 +15,7 @@ import math
 import os
 import random
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from io import BytesIO
 from pathlib import Path
 from typing import Optional, Sequence
@@ -627,6 +627,10 @@ class Msg:
     file_size: str = ""
     call_missed: bool = False
     sticker: str = ""                 # эмодзи, если kind == "sticker"
+    sender: Optional[str] = None      # имя над репликой — только в группах
+    sender_color: int = 0             # индекс в NAME_COLORS
+    avatar: Optional[Image.Image] = None   # аватарка слева, у последней в серии
+    first_of_run: bool = True         # первая в серии подряд идущих от одного
 
 
 # Метрики в пойнтах. Взяты из макета iOS-телеграма.
@@ -657,6 +661,18 @@ WAVE_BAR, WAVE_GAP, WAVE_MAX_H = 2.3, 2.1, 22
 VNOTE_D = 230
 STICKER_D = 140
 FILE_H, CALL_H = 70, 58
+# Группы: аватарка слева и имя отправителя над репликой. Метрики прикидочные —
+# скриншота групповго чата под рукой не было, в отличие от личной переписки.
+GROUP_AVA_D = 29          # диаметр аватарки
+GROUP_INDENT = 36         # на столько входящие пузыри отъезжают вправо
+NAME_H = 19               # строка с именем внутри пузыря
+NAME_PT = 15
+
+# Телеграмовская палитра имён: цвет закреплён за участником, не за репликой
+NAME_COLORS = (
+    (231, 132, 128), (243, 170, 116), (173, 155, 231), (126, 197, 118),
+    (117, 199, 201), (114, 175, 221), (238, 133, 176),
+)
 REPLY_H = 40
 REACT_H = 30
 FWD_H = 41
@@ -735,6 +751,10 @@ def _measure(msg: Msg, th: Theme) -> dict:
     if msg.reaction:
         react_w = PX(16) + PX(REACT_H * 0.62) + PX(6) + int(font(13.5, 600).getlength(str(msg.reaction_count)))
 
+    name_w = 0
+    if msg.sender:
+        name_w = int(font(NAME_PT, 600).getlength(msg.sender))
+
     fwd_w = 0
     if msg.forwarded_from:
         fwd_w = max(int(font(14, 500).getlength("Переслано от")),
@@ -747,7 +767,7 @@ def _measure(msg: Msg, th: Theme) -> dict:
                                       int(rf.getlength(msg.reply_text or ""))) + PX(14))
 
     content_w = max(text_w + (PX(TIME_GAP) + time_w if time_inline else 0),
-                    reply_w, react_w, fwd_w, 0)
+                    reply_w, react_w, fwd_w, name_w, 0)
     content_w = min(content_w, max_bubble_w - PX(PAD_X) * 2)
     photo_w = photo_h = inset = 0
     if msg.photo is not None:
@@ -762,6 +782,8 @@ def _measure(msg: Msg, th: Theme) -> dict:
     bubble_w = max(bubble_w, PX(56))
 
     h = 0
+    if msg.sender:
+        h += PX(NAME_H)
     if photo_h:
         h += photo_h + inset
     if msg.forwarded_from:
@@ -968,6 +990,11 @@ def _draw_bubble(canvas: Image.Image, msg: Msg, th: Theme, m: dict,
 
     cy = 0 if bare_photo else PX(PAD_Y)
 
+    if msg.sender:
+        d.text((PX(PAD_X), cy - PX(1)), msg.sender, font=font(NAME_PT, 600),
+               fill=NAME_COLORS[msg.sender_color % len(NAME_COLORS)] + (255,))
+        cy += PX(NAME_H)
+
     if msg.forwarded_from:
         fx, fy = PX(PAD_X), cy
         accent = th.text_out if msg.out else th.header_accent
@@ -1055,7 +1082,8 @@ def _glass(canvas: Image.Image, box, radius: int, tint) -> None:
     canvas.paste(region, (x0, y0), mask.resize(region.size, Image.LANCZOS))
 
 
-def _avatar(size: int, name: str, img: Optional[Image.Image]) -> Image.Image:
+def _avatar(size: int, name: str, img: Optional[Image.Image],
+            color_idx: Optional[int] = None) -> Image.Image:
     mask = Image.new("L", (size * 2, size * 2), 0)
     ImageDraw.Draw(mask).ellipse((0, 0, size * 2 - 1, size * 2 - 1), fill=255)
     mask = mask.resize((size, size), Image.LANCZOS)
@@ -1066,10 +1094,16 @@ def _avatar(size: int, name: str, img: Optional[Image.Image]) -> Image.Image:
                         (src.width + side) // 2, (src.height + side) // 2))
         base = src.resize((size, size), Image.LANCZOS).convert("RGBA")
     else:
-        palette = [((255, 81, 106), (255, 136, 94)), ((84, 203, 104), (168, 233, 106)),
-                   ((102, 136, 255), (132, 194, 255)), ((232, 168, 56), (255, 209, 106)),
-                   ((167, 104, 255), (216, 140, 255))]
-        top, bot = palette[sum(map(ord, name or "?")) % len(palette)]
+        if color_idx is not None:
+            # в группе кружок должен быть того же цвета, что и имя над репликой
+            base = NAME_COLORS[color_idx % len(NAME_COLORS)]
+            top = tuple(min(255, c + 34) for c in base)
+            bot = tuple(max(0, c - 28) for c in base)
+        else:
+            palette = [((255, 81, 106), (255, 136, 94)), ((84, 203, 104), (168, 233, 106)),
+                       ((102, 136, 255), (132, 194, 255)), ((232, 168, 56), (255, 209, 106)),
+                       ((167, 104, 255), (216, 140, 255))]
+            top, bot = palette[sum(map(ord, name or "?")) % len(palette)]
         base = mesh_gradient((size, size), (top, top, bot, bot)).convert("RGBA")
         letters = "".join(w[0] for w in (name or "?").split()[:2]).upper()
         d = ImageDraw.Draw(base)
@@ -1253,6 +1287,24 @@ def _area(th: Theme, pinned: Optional[str]) -> tuple:
     return top, bottom
 
 
+def prep_runs(messages: Sequence, group: bool = False) -> list:
+    """Размечает серии подряд идущих реплик одного отправителя.
+
+    В телеграме имя в группе стоит только над ПЕРВОЙ репликой серии, хвостик и
+    аватарка достаются последней, а зазор внутри серии меньше, чем между
+    разными людьми. Считаем это один раз здесь, чтобы замер и отрисовка не
+    разошлись: оба смотрят на first_of_run.
+    """
+    out, prev = [], None
+    for m in messages:
+        first = (prev is None or prev.out != m.out
+                 or (group and prev.sender != m.sender))
+        out.append(replace(m, first_of_run=first,
+                           sender=m.sender if (first and group) else None))
+        prev = m
+    return out
+
+
 def _blocks(messages: Sequence, th: Theme) -> list:
     """Для каждого сообщения: (высота разделителя даты, зазор сверху, высота
     пузыря, замер). Зазор считается от предыдущего сообщения в общем списке."""
@@ -1260,7 +1312,7 @@ def _blocks(messages: Sequence, th: Theme) -> list:
     for i, m in enumerate(messages):
         mm = _measure(m, th)
         date_h = PX(23) + PX(10) if m.date else 0
-        gap = PX(GAP_SAME if messages[i - 1].out == m.out else GAP_DIFF) if i else 0
+        gap = PX(GAP_DIFF if m.first_of_run else GAP_SAME) if i else 0
         out.append((date_h, gap, mm["h"], mm))
     return out
 
@@ -1275,7 +1327,7 @@ def page_count(messages: Sequence, *, theme: str = "ios_dark",
     th = THEMES.get(theme, THEMES["ios_dark"])
     top, bottom = _area(th, pinned)
     avail = bottom - top
-    total = content_height(messages, th)
+    total = content_height(prep_runs(list(messages)), th)
     if total <= avail:
         return 1
     return min(max_pages, math.ceil(total / avail))
@@ -1292,11 +1344,12 @@ def make_chat_screenshot(messages: Sequence[Msg], *, theme: str = "ios_dark",
                          clock: str = "13:17",
                          align: str = "bottom",
                          scroll: int = 0,
+                         group: bool = False,
                          up_to: Optional[int] = None) -> BytesIO:
     """Собирает скриншот чата. up_to ограничивает число показанных сообщений —
     через него потом делается видео: кадр на каждое новое сообщение."""
     th = THEMES.get(theme, THEMES["ios_dark"])
-    msgs = list(messages)[:up_to] if up_to is not None else list(messages)
+    msgs = prep_runs(list(messages)[:up_to] if up_to is not None else list(messages), group)
 
     W, H = PX(SCREEN_W_PT), PX(SCREEN_H_PT)
     canvas = mesh_gradient((W, H), th.wallpaper).convert("RGBA")
@@ -1333,14 +1386,21 @@ def make_chat_screenshot(messages: Sequence[Msg], *, theme: str = "ios_dark",
         if m.date:
             y += _date_pill(canvas, th, m.date, y)
         if i:
-            y += PX(GAP_SAME if msgs[i - 1].out == m.out else GAP_DIFF)
-        last_of_run = (i == len(msgs) - 1) or (msgs[i + 1].out != m.out)
-        x = W - PX(EDGE) - mm["w"] if m.out else PX(EDGE)
+            y += PX(GAP_DIFF if m.first_of_run else GAP_SAME)
+        if m.first_of_run:
+            run_name = m.sender or ""     # у продолжений имя стёрто, помним его
+        nxt = msgs[i + 1] if i + 1 < len(msgs) else None
+        last_of_run = nxt is None or nxt.first_of_run
+        indent = PX(GROUP_INDENT) if (group and not m.out) else 0
+        x = W - PX(EDGE) - mm["w"] if m.out else PX(EDGE) + indent
         if y + mm["h"] > area_top - PX(40):
             if mm["kind"] in ("videonote", "sticker"):
                 _draw_bare(canvas, m, th, mm, x, y)
             else:
                 _draw_bubble(canvas, m, th, mm, x, y, last_of_run, grad)
+            if group and not m.out and last_of_run:
+                ava = _avatar(PX(GROUP_AVA_D), run_name, m.avatar, m.sender_color)
+                canvas.alpha_composite(ava, (PX(6), y + mm["h"] - PX(GROUP_AVA_D)))
         y += mm["h"]
 
     _header(canvas, th, contact_name, subtitle, avatar, unread)
@@ -1368,7 +1428,7 @@ def make_chat_pages(messages: Sequence, *, max_pages: int = 10, **kwargs) -> lis
     th = THEMES.get(kwargs.get("theme", "ios_dark"), THEMES["ios_dark"])
     top, bottom = _area(th, kwargs.get("pinned"))
     avail = bottom - top
-    total = content_height(messages, th)
+    total = content_height(prep_runs(list(messages), kwargs.get("group", False)), th)
     msgs = list(messages)
 
     if total <= avail:
