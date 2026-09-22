@@ -336,7 +336,10 @@ async def got_title(message: Message, state: FSMContext, bot: Bot) -> None:
     if not file_id:
         await state.update_data(stk_pending_title=title)
         await state.set_state(StickerStates.waiting_photos)
-        await message.answer(f"пак «{title}» заведу на первой же картинке — пришли её")
+        await message.answer(
+            f"название «{title}» запомнил\n\n"
+            "теперь пришли первую картинку — телеграм не умеет создавать пустые паки, "
+            "так что пак появится вместе с ней. подойдёт любое фото")
         return
     name, err = await create_pack(bot, message.from_user.id, title, file_id)
     if err:
@@ -397,8 +400,9 @@ async def my_packs(message: Message) -> None:
     packs = user_packs(message.from_user.id)
     if not packs:
         await message.answer(
-            "паков пока нет\n\n"
-            f"проще всего завести так: сделай мем и нажми под ним «{BTN_TO_STICKERS}»",
+            "паков пока нет, завести можно двумя путями\n\n"
+            "кнопкой ниже — спрошу название и попрошу первую картинку\n"
+            f"или сделай мем и нажми под ним «{BTN_TO_STICKERS}» — пак заведётся сам",
             reply_markup=packs_kb(packs))
         return
     lines = ["твои паки:", ""]
