@@ -43,6 +43,7 @@ from memegen import make_meme, make_classic_meme, make_demotivator, FONT_CHOICES
 import stats
 import submission_queue
 import chatflow
+import stickers
 import phrase_queue
 
 logging.basicConfig(level=logging.INFO)
@@ -123,6 +124,7 @@ dp.callback_query.middleware(SubscriptionGateMiddleware())
 BTN_ADD_PHRASE = "✍️ Добавить фразу"
 BTN_CUSTOM_MEME = "🖼 Свой мем"
 BTN_CHAT = chatflow.BTN_CHAT
+BTN_PACKS = stickers.BTN_PACKS
 BTN_SUBMIT = "📮 Предложить в канал"
 BTN_HELP = "❓ Помощь"
 BTN_CANCEL = "✖️ Отмена"
@@ -132,7 +134,7 @@ main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text=BTN_ADD_PHRASE), KeyboardButton(text=BTN_CUSTOM_MEME)],
         [KeyboardButton(text=BTN_CHAT)],
-        [KeyboardButton(text=BTN_SUBMIT)],
+        [KeyboardButton(text=BTN_SUBMIT), KeyboardButton(text=BTN_PACKS)],
         [KeyboardButton(text=BTN_HELP)],
     ],
     resize_keyboard=True,
@@ -194,10 +196,11 @@ def try_again_kb(render_id: str, submitted: bool = False) -> InlineKeyboardMarku
         else InlineKeyboardButton(text=BTN_SUBMIT_THIS, callback_data=f"submit_last:{render_id}")
     )
     return InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(text=BTN_TRY_AGAIN, callback_data=f"try_again:{render_id}"),
-            submit_btn,
-        ]]
+        inline_keyboard=[
+            [InlineKeyboardButton(text=BTN_TRY_AGAIN, callback_data=f"try_again:{render_id}"),
+             submit_btn],
+            [stickers.sticker_btn()],
+        ]
     )
 
 
@@ -207,7 +210,7 @@ def submit_this_kb(render_id: str, submitted: bool = False) -> InlineKeyboardMar
         if submitted
         else InlineKeyboardButton(text=BTN_SUBMIT_THIS, callback_data=f"submit_custom:{render_id}")
     )
-    return InlineKeyboardMarkup(inline_keyboard=[[submit_btn]])
+    return InlineKeyboardMarkup(inline_keyboard=[[submit_btn], [stickers.sticker_btn()]])
 
 
 def custom_format_kb() -> InlineKeyboardMarkup:
@@ -337,7 +340,9 @@ def build_help_text() -> str:
         f"{BTN_CHAT} — собрать скриншот переписки: имена, аватарки, реплики, "
         "голосовые, кружки, стикеры. бот ведёт по шагам, ничего писать "
         "спецсимволами не надо\n"
-        f"{BTN_SUBMIT} — предложить мем в канал (после ручной проверки)\n\n"
+        f"{BTN_SUBMIT} — предложить мем в канал (после ручной проверки)\n"
+        f"{BTN_PACKS} — свои стикерпаки: под каждым мемом есть кнопка "
+        "«в стикеры», можно и просто накидать своих картинок\n\n"
         "команды (для тех кто любит текстом):\n"
         "/add текст — то же самое что кнопка, но одним сообщением\n"
         "/reset — сбросить очередь показанных фраз для этого чата"
@@ -903,6 +908,7 @@ async def main() -> None:
         raise SystemExit("Не задан BOT_TOKEN. Сделай: export BOT_TOKEN='твой_токен_от_BotFather'")
 
     dp.include_router(chatflow.router)
+    dp.include_router(stickers.router)
     bot = Bot(token=BOT_TOKEN)
     await dp.start_polling(bot)
 

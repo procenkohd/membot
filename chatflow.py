@@ -36,6 +36,7 @@ from aiogram.types import (
 from PIL import Image
 
 import chatgen
+import stickers
 
 router = Router(name="chatflow")
 
@@ -707,8 +708,11 @@ async def render(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
 
     caption = "мем-машина без вкуса и совести: @randomem_bot"
     if len(pages) == 1:
+        # кнопка «в стикеры» живёт под самой картинкой: колбэк берёт file_id
+        # прямо из сообщения, поэтому она работает и после перезапуска бота
         await callback.message.answer_photo(
-            BufferedInputFile(pages[0].read(), filename="chat.jpg"), caption=caption)
+            BufferedInputFile(pages[0].read(), filename="chat.jpg"), caption=caption,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[stickers.sticker_btn()]]))
     else:
         # в альбоме подпись показывается только у первой картинки
         media = [InputMediaPhoto(
