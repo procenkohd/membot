@@ -130,6 +130,7 @@ BTN_SUBMIT = "📮 Предложить в канал"
 BTN_HELP = "❓ Помощь"
 BTN_CANCEL = ui.BTN_CANCEL
 BTN_TRY_AGAIN = "🔁 Попробуй ещё"
+BTN_REPIC = "🖼 Другая картинка"
 
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
@@ -197,7 +198,8 @@ def try_again_kb(render_id: str, submitted: bool = False) -> InlineKeyboardMarku
         inline_keyboard=[
             [InlineKeyboardButton(text=BTN_TRY_AGAIN, callback_data=f"try_again:{render_id}"),
              submit_btn],
-            [stickers.sticker_btn()],
+            [InlineKeyboardButton(text=BTN_REPIC, callback_data=f"repic:{render_id}"),
+             stickers.sticker_btn()],
         ]
     )
 
@@ -208,7 +210,11 @@ def submit_this_kb(render_id: str, submitted: bool = False) -> InlineKeyboardMar
         if submitted
         else InlineKeyboardButton(text=BTN_SUBMIT_THIS, callback_data=f"submit_custom:{render_id}")
     )
-    return InlineKeyboardMarkup(inline_keyboard=[[submit_btn], [stickers.sticker_btn()]])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [submit_btn],
+        [InlineKeyboardButton(text=BTN_REPIC, callback_data=f"repic:{render_id}"),
+         stickers.sticker_btn()],
+    ])
 
 
 def custom_format_kb() -> InlineKeyboardMarkup:
@@ -319,6 +325,7 @@ class MemeStates(StatesGroup):
     waiting_custom_text = State()     # ждём текст для своего мема
     waiting_submit_photo = State()    # ждём фото для предложки
     waiting_submit_text = State()     # ждём текст (или "-") для предложки
+    waiting_repic = State()           # ждём новую картинку под уже готовую надпись
 
 
 class AdminStates(StatesGroup):
@@ -528,10 +535,85 @@ async def custom_meme_got_text(message: Message, state: FSMContext, bot: Bot) ->
         caption=MEME_CAPTION,
         reply_markup=submit_this_kb(render_id),
     )
-    renders = remember_render(data, render_id, {"rendered_file_id": sent.photo[-1].file_id})
+    await message.answer("можно кидать следующее фото", reply_markup=main_kb)
+    renders = remember_render(data, render_id, {
+        "rendered_file_id": sent.photo[-1].file_id,
+        # текст держим при рендере, чтобы «другая картинка» могла его повторить
+        "spec": {"kind": "custom", "text": message.text.strip(), "fmt": fmt,
+                 "font_id": data.get("custom_font_id")},
+    })
     await state.update_data(renders=renders)
 
     await offer_custom_text_as_phrase(bot, message.text.strip(), message.chat.id)
+
+
+# ---------- та же надпись на другой картинке ----------
+
+def render_by_spec(image_bytes: bytes, spec: dict):
+    """Пересобирает мем по сохранённой надписи. Случайная фраза рисуется как
+    обычно, своя — тем же форматом и шрифтом, что выбрал юзер в первый раз."""
+    if spec.get("kind") == "custom":
+        top, bottom = parse_phrase(spec.get("text", ""))
+        if spec.get("fmt") == "demotivator":
+            caption, subtitle = (top, bottom) if top else (bottom, "")
+            return make_demotivator(image_bytes, caption, subtitle)
+        font_id = spec.get("font_id")
+        font_choice = FONT_CHOICES_BY_ID.get(font_id) if font_id else None
+        return make_classic_meme(image_bytes, top, bottom or "", font_choice=font_choice)
+    top, bottom = parse_phrase(spec.get("phrase", ""))
+    return make_meme(image_bytes, top, bottom or "")
+
+
+@dp.callback_query(F.data.startswith("repic:"))
+async def repic_ask(callback: CallbackQuery, state: FSMContext) -> None:
+    render_id = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    spec = ((data.get("renders") or {}).get(render_id) or {}).get("spec")
+    if not spec:
+        await callback.answer("надпись этого мема я уже не помню, сделай новый",
+                              show_alert=True)
+        return
+    await state.set_state(MemeStates.waiting_repic)
+    await state.update_data(repic_spec=spec)
+    await callback.answer()
+    await callback.message.answer("кидай другую картинку — надпись оставлю ту же",
+                                  reply_markup=cancel_kb)
+
+
+@dp.message(MemeStates.waiting_repic, F.photo)
+async def repic_photo(message: Message, state: FSMContext, bot: Bot) -> None:
+    data = await state.get_data()
+    spec = data.get("repic_spec")
+    if not spec:
+        await reset_state(state)
+        await message.answer("что-то потерялось, давай заново", reply_markup=main_kb)
+        return
+
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    image_bytes = (await bot.download_file(file.file_path)).read()
+    try:
+        meme_buf = render_by_spec(image_bytes, spec)
+    except Exception:
+        logger.exception("Failed to re-render meme with a new photo")
+        await message.answer("не получилось собрать, попробуй другую картинку")
+        return
+
+    await state.set_state(None)
+    render_id = new_render_id()
+    kb = try_again_kb(render_id) if spec.get("kind") == "random" else submit_this_kb(render_id)
+    sent = await message.answer_photo(
+        BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
+        caption=MEME_CAPTION, reply_markup=kb)
+    await message.answer("можно менять картинку дальше или кидать новое фото",
+                         reply_markup=main_kb)
+    data = await state.get_data()
+    renders = remember_render(data, render_id, {
+        "source_file_id": photo.file_id,
+        "rendered_file_id": sent.photo[-1].file_id,
+        "spec": spec,
+    })
+    await state.update_data(renders=renders)
 
 
 # ---------- обычный режим: просто прислали фото -> случайный мем ----------
@@ -561,7 +643,9 @@ async def handle_photo(message: Message, state: FSMContext, bot: Bot) -> None:
     )
     data = await state.get_data()
     renders = remember_render(
-        data, render_id, {"source_file_id": photo.file_id, "rendered_file_id": sent.photo[-1].file_id}
+        data, render_id, {"source_file_id": photo.file_id,
+                          "rendered_file_id": sent.photo[-1].file_id,
+                          "spec": {"kind": "random", "phrase": phrase}}
     )
     await state.update_data(renders=renders)
 
