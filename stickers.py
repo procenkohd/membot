@@ -37,6 +37,7 @@ from aiogram.types import (
 from PIL import Image
 
 import storage
+import ui
 
 router = Router(name="stickers")
 
@@ -255,7 +256,8 @@ async def to_stickers(callback: CallbackQuery, state: FSMContext, bot: Bot) -> N
         await callback.answer()
         await callback.message.answer(
             "стикерпака у тебя ещё нет, давай заведём\n\n"
-            "как его назвать? это имя увидят все, кому пришлёшь стикер")
+            "как его назвать? это имя увидят все, кому пришлёшь стикер",
+            reply_markup=ui.cancel_kb)
         return
     if len(packs) == 1:
         await callback.answer("кладу")
@@ -324,7 +326,7 @@ async def pick_pack(callback: CallbackQuery, state: FSMContext, bot: Bot) -> Non
 async def new_pack(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(StickerStates.waiting_title)
     await callback.answer()
-    await callback.message.answer("как назвать новый пак?")
+    await callback.message.answer("как назвать новый пак?", reply_markup=ui.cancel_kb)
 
 
 @router.message(StickerStates.waiting_title, F.text)
@@ -339,7 +341,8 @@ async def got_title(message: Message, state: FSMContext, bot: Bot) -> None:
         await message.answer(
             f"название «{title}» запомнил\n\n"
             "теперь пришли первую картинку — телеграм не умеет создавать пустые паки, "
-            "так что пак появится вместе с ней. подойдёт любое фото")
+            "так что пак появится вместе с ней. подойдёт любое фото",
+            reply_markup=ui.cancel_kb)
         return
     name, err = await create_pack(bot, message.from_user.id, title, file_id)
     if err:
@@ -366,8 +369,9 @@ async def dump_mode(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(stk_pack=packs[0]["name"])
     await callback.answer()
     await callback.message.answer(
-        f"кидай картинки — каждая уйдёт в «{packs[0]['title']}»\n"
-        "когда надоест, жми отмену")
+        f"кидай картинки — каждая уйдёт в «{packs[0]['title']}»\n\n"
+        f"«{ui.BTN_CANCEL}» вернёт в обычный режим, где фото превращаются в мемы",
+        reply_markup=ui.cancel_kb)
 
 
 @router.message(StickerStates.waiting_photos, F.photo)
@@ -384,6 +388,9 @@ async def dump_photo(message: Message, state: FSMContext, bot: Bot) -> None:
         await state.update_data(stk_pending_title=None, stk_pack=name, stk_last=sid)
         await message.answer(f"пак «{title}» создан, эмодзи {DEFAULT_EMOJI}\n{pack_link(name)}",
                              reply_markup=emoji_kb() if sid else None)
+        await message.answer(
+            f"можно кидать ещё картинки, а «{ui.BTN_CANCEL}» вернёт к обычным мемам",
+            reply_markup=ui.cancel_kb)
         return
     name = data.get("stk_pack")
     packs = user_packs(message.from_user.id)
@@ -432,7 +439,8 @@ async def change_emoji(callback: CallbackQuery, state: FSMContext, bot: Bot) -> 
         await state.update_data(stk_return_state=await state.get_state())
         await state.set_state(StickerStates.waiting_emoji)
         await callback.answer()
-        await callback.message.answer("пришли эмодзи, который повесить на стикер")
+        await callback.message.answer("пришли эмодзи, который повесить на стикер",
+                                      reply_markup=ui.cancel_kb)
         return
     err = await _apply_emoji(bot, state, value)
     await callback.answer(err or f"теперь {value}", show_alert=bool(err))

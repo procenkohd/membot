@@ -44,6 +44,7 @@ import stats
 import submission_queue
 import chatflow
 import stickers
+import ui
 import phrase_queue
 
 logging.basicConfig(level=logging.INFO)
@@ -127,7 +128,7 @@ BTN_CHAT = chatflow.BTN_CHAT
 BTN_PACKS = stickers.BTN_PACKS
 BTN_SUBMIT = "📮 Предложить в канал"
 BTN_HELP = "❓ Помощь"
-BTN_CANCEL = "✖️ Отмена"
+BTN_CANCEL = ui.BTN_CANCEL
 BTN_TRY_AGAIN = "🔁 Попробуй ещё"
 
 main_kb = ReplyKeyboardMarkup(
@@ -140,10 +141,7 @@ main_kb = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
-cancel_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text=BTN_CANCEL)]],
-    resize_keyboard=True,
-)
+cancel_kb = ui.cancel_kb
 
 
 BTN_SUBMIT_THIS = "📮 В предложку"

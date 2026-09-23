@@ -37,17 +37,14 @@ from PIL import Image
 
 import chatgen
 import stickers
+import ui
 
 router = Router(name="chatflow")
 
 BTN_CHAT = "💬 Создать фейк-переписку"
 SKIP = "chat:skip"
 
-# Текст обязан совпадать с BTN_CANCEL в bot.py: выход из сценария обрабатывает
-# общий хендлер отмены, он же чистит состояние.
-CANCEL_TEXT = "✖️ Отмена"
-cancel_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=CANCEL_TEXT)]],
-                                resize_keyboard=True)
+cancel_kb = ui.cancel_kb    # выход обрабатывает общий хендлер в bot.py
 
 
 class ChatStates(StatesGroup):
