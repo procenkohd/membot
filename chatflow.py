@@ -200,7 +200,12 @@ def describe(draft: dict) -> str:
                                  else "входящий звонок"),
             }.get(it["kind"], it["kind"])
             mark = "↩️ " if it.get("reply_to") is not None else ""
-            react = f" {it['reaction']}" if it.get("reaction") else ""
+            react = ""
+            if it.get("reaction"):
+                react = f" {it['reaction']}"
+                if it.get("reactor") is not None:
+                    # в скобках, чтобы не склонять имя: «от Валентина Петровна»
+                    react += f" ({e(sender_name(draft, it['reactor']))})"
             lines.append(f"{i}. {mark}<b>{e(name)}:</b> {e(str(body))}{react}  ·{t}")
 
     lines += [
@@ -345,10 +350,21 @@ async def build_messages(bot: Bot, draft: dict) -> list:
                     cache[fid] = await _img(bot, fid)
                 sender_ava = cache[fid]
 
-        # реакцию ставит «другая сторона», поэтому и аватарка её
+        # чья реакция — того и аватарка в чипе. В группе автора выбирают
+        # явно, в переписке на двоих это всегда «другая сторона»
         reactor_photo = None
+        reactor_name = None
+        reactor_color = None
         if it.get("reaction"):
-            fid = draft.get("contact_avatar") if it["out"] else draft.get("my_avatar")
+            r = it.get("reactor")
+            if r is not None:
+                reactor_name = sender_name(draft, r)
+                reactor_color = r if r >= 0 else None
+                members = draft.get("members", [])
+                fid = (draft.get("my_avatar") if r < 0
+                       else (members[r].get("avatar") if r < len(members) else None))
+            else:
+                fid = draft.get("contact_avatar") if it["out"] else draft.get("my_avatar")
             if fid:
                 if (fid, "RGB") not in cache:
                     cache[(fid, "RGB")] = await _img(bot, fid)
@@ -360,6 +376,7 @@ async def build_messages(bot: Bot, draft: dict) -> list:
             file_name=it.get("file_name", ""), file_size=it.get("file_size", ""),
             call_missed=bool(it.get("call_missed")), sticker=it.get("sticker", ""),
             reaction=it.get("reaction"), reactor_photo=reactor_photo,
+            reactor=reactor_name, reactor_color=reactor_color,
             sender=(sender_name(draft, sender_idx)
                     if (is_group(draft) and sender_idx >= 0) else None),
             sender_color=sender_idx if sender_idx >= 0 else 0,
@@ -1016,6 +1033,21 @@ async def set_reaction(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     draft = data["draft"]
     draft["items"][-1]["reaction"] = callback.data.split("chat:setreact:")[1]
+    await state.update_data(draft=draft)
+    await callback.answer()
+    if is_group(draft):
+        # в группе реакцию мог поставить кто угодно, поэтому спрашиваем
+        await callback.message.edit_text(
+            "кто поставил реакцию?", reply_markup=_people_kb(draft, "chat:reactor"))
+        return
+    await show_builder(callback.message, draft, edit=True)
+
+
+@router.callback_query(ChatStates.builder, F.data.startswith("chat:reactor:"))
+async def set_reactor(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    draft = data["draft"]
+    draft["items"][-1]["reactor"] = int(callback.data.split(":")[2])
     await state.update_data(draft=draft)
     await callback.answer()
     await show_builder(callback.message, draft, edit=True)

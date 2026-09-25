@@ -274,6 +274,31 @@ def split_runs(text: str) -> list:
     return [r for r in runs if r[1]]
 
 
+# Ссылки, упоминания и хештеги телеграм выделяет: в своём пузыре — тем же
+# цветом, но с подчёркиванием, во входящем — акцентным цветом (тоже с ним).
+_LINK_RE = re.compile(
+    r"(https?://\S+"
+    r"|www\.[^\s,;]+"
+    r"|t\.me/[^\s,;]+"
+    r"|[a-zA-Z0-9-]+\.(?:ru|com|org|net|io|me|рф)(?:/[^\s,;]*)?"
+    r"|@[A-Za-z0-9_]{3,}"
+    r"|#[^\s,.;!?]+)"
+)
+
+
+def split_links(text: str) -> list:
+    """Режет обычный текст на куски «просто текст» / «ссылка»."""
+    out, pos = [], 0
+    for m in _LINK_RE.finditer(text):
+        if m.start() > pos:
+            out.append((False, text[pos:m.start()]))
+        out.append((True, m.group()))
+        pos = m.end()
+    if pos < len(text):
+        out.append((False, text[pos:]))
+    return out
+
+
 def measure_runs(runs: Sequence, f: ImageFont.FreeTypeFont, emoji_px: int) -> int:
     w = 0
     for kind, sub in runs:
@@ -286,14 +311,23 @@ def measure(text: str, f: ImageFont.FreeTypeFont, emoji_px: int) -> int:
 
 
 def draw_runs(img: Image.Image, xy, text: str, f: ImageFont.FreeTypeFont,
-              fill, emoji_px: int, line_h: int) -> None:
-    """Рисует строку, подменяя шрифт на эмодзи-картинки там, где надо."""
+              fill, emoji_px: int, line_h: int, link_fill=None) -> None:
+    """Рисует строку, подменяя шрифт на эмодзи-картинки там, где надо, и
+    выделяя ссылки с упоминаниями подчёркиванием."""
     x, y = xy
     d = ImageDraw.Draw(img)
     for kind, sub in split_runs(text):
         if kind == "text":
-            d.text((x, y), sub, font=f, fill=fill)
-            x += int(f.getlength(sub))
+            for is_link, piece in split_links(sub):
+                w = int(f.getlength(piece))
+                colour = (link_fill or fill) if is_link else fill
+                d.text((x, y), piece, font=f, fill=colour)
+                if is_link:
+                    # линию ведём под нижней границей глифов, иначе она режет
+                    # хвосты у «р» и «@»
+                    uy = y + f.getbbox(piece)[3] + PX(1.5)
+                    d.line((x, uy, x + w - 1, uy), fill=colour, width=max(1, PX(0.7)))
+                x += w
         else:
             em = render_emoji(sub, emoji_px)
             if em is None:                      # нет картинки — рисуем шрифтом
@@ -636,6 +670,7 @@ class Msg:
     reaction_count: int = 1
     reactor: Optional[str] = None            # чья аватарка стоит рядом с реакцией
     reactor_photo: Optional[Image.Image] = None
+    reactor_color: Optional[int] = None      # тот же цвет, что у имени автора
     reply_name: Optional[str] = None
     reply_text: Optional[str] = None
     photo: Optional[Image.Image] = None
@@ -905,7 +940,7 @@ def _reaction_chip(layer: Image.Image, d: ImageDraw.ImageDraw, msg: Msg, th: The
     if em is not None:
         layer.alpha_composite(em, (x + PX(9), int(y + (PX(REACT_H) - ew) / 2)))
     if solo:
-        av = (_avatar(int(ew), msg.reactor, msg.reactor_photo)
+        av = (_avatar(int(ew), msg.reactor, msg.reactor_photo, msg.reactor_color)
               if (msg.reactor or msg.reactor_photo) else _blank_avatar(int(ew)))
         layer.alpha_composite(av, (x + PX(9) + int(ew) + PX(5), int(y + (PX(REACT_H) - ew) / 2)))
     else:
@@ -1034,7 +1069,7 @@ def _draw_bare(canvas: Image.Image, msg: Msg, th: Theme, m: dict, x: int, y: int
         em = render_emoji(msg.reaction, int(ew))
         if em is not None:
             rl.alpha_composite(em, (PX(9), int((PX(REACT_H) - ew) / 2)))
-        rl.alpha_composite(_avatar(int(ew), msg.reactor, msg.reactor_photo)
+        rl.alpha_composite(_avatar(int(ew), msg.reactor, msg.reactor_photo, msg.reactor_color)
                            if (msg.reactor or msg.reactor_photo) else _blank_avatar(int(ew)),
                            (PX(9) + int(ew) + PX(5), int((PX(REACT_H) - ew) / 2)))
         canvas.alpha_composite(rl, (x, y + D + PX(6)))
@@ -1107,8 +1142,10 @@ def _draw_bubble(canvas: Image.Image, msg: Msg, th: Theme, m: dict,
         layer.paste(pic.convert("RGBA"), (ins, cy), pm)
         cy += ph_ + (PX(PAD_Y) if m["lines"] else 0)
 
+    link_color = text_color if msg.out else th.link
     for i, line in enumerate(m["lines"]):
-        draw_runs(layer, (PX(PAD_X), cy), line, f, text_color, m["emoji_px"], m["line_h"])
+        draw_runs(layer, (PX(PAD_X), cy), line, f, text_color, m["emoji_px"],
+                  m["line_h"], link_fill=link_color)
         cy += m["line_h"]
 
     if msg.reaction:
