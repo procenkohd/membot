@@ -388,25 +388,15 @@ def skip_kb(text: str = "пропустить") -> InlineKeyboardMarkup:
         inline_keyboard=[[InlineKeyboardButton(text=text, callback_data=SKIP)]])
 
 
-def _num_kb(prefix: str, values: tuple) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=str(v), callback_data=f"{prefix}:{v}") for v in values[:4]],
-        [InlineKeyboardButton(text=str(v), callback_data=f"{prefix}:{v}") for v in values[4:]],
-    ])
-
-
 async def _ask_group_size(message: Message, state: FSMContext) -> None:
     await state.set_state(ChatStates.group_size)
-    await message.answer(
-        "сколько человек в группе? это только для шапки — добавлять их всех не надо\n"
-        "можно нажать кнопку или написать своё число",
-        reply_markup=_num_kb("chat:size", (8, 23, 47, 128, 256, 512, 1024, 9999)))
+    await message.answer("сколько человек в группе? напиши числом\n"
+                         "это только для шапки, добавлять их всех не надо")
 
 
 async def _ask_group_online(message: Message, state: FSMContext) -> None:
     await state.set_state(ChatStates.group_online)
-    await message.answer("а сколько из них сейчас в сети?",
-                         reply_markup=_num_kb("chat:online", (0, 1, 2, 3, 5, 12, 40, 100)))
+    await message.answer("а сколько из них сейчас в сети? тоже числом")
 
 
 async def _set_size(message: Message, state: FSMContext, value: int) -> None:
@@ -425,26 +415,6 @@ async def _set_online(message: Message, state: FSMContext, value: int) -> None:
     await state.update_data(draft=draft)
     await message.answer(f"в шапке будет: {group_subtitle(draft)}")
     await _ask_theme(message, state)
-
-
-@router.callback_query(F.data.startswith("chat:size:"))
-async def pick_size(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
-    try:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-    await _set_size(callback.message, state, int(callback.data.split(":")[2]))
-
-
-@router.callback_query(F.data.startswith("chat:online:"))
-async def pick_online(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
-    try:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-    await _set_online(callback.message, state, int(callback.data.split(":")[2]))
 
 
 @router.message(ChatStates.group_size, F.text)
