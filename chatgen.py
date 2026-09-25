@@ -662,15 +662,23 @@ THEMES.update({
 # ---------- модель сообщения ----------
 
 @dataclass
+class Reaction:
+    """Один чип реакции. Аватарки показываются, пока людей немного — дальше
+    телеграм заменяет их счётчиком, иначе чип разрастается на весь пузырь."""
+    emoji: str
+    count: int = 1
+    mine: bool = False                       # моя реакция — чип подсвечен
+    avatars: list = field(default_factory=list)   # картинки или None
+    colors: list = field(default_factory=list)    # цвета кружков-заглушек
+    names: list = field(default_factory=list)     # для инициалов, если фото нет
+
+
+@dataclass
 class Msg:
     text: str = ""
     out: bool = False                 # True — наше, справа
     time: str = "12:00"
-    reaction: Optional[str] = None    # эмодзи реакции
-    reaction_count: int = 1
-    reactor: Optional[str] = None            # чья аватарка стоит рядом с реакцией
-    reactor_photo: Optional[Image.Image] = None
-    reactor_color: Optional[int] = None      # тот же цвет, что у имени автора
+    reactions: list = field(default_factory=list)   # список Reaction
     reply_name: Optional[str] = None
     reply_text: Optional[str] = None
     photo: Optional[Image.Image] = None
@@ -733,6 +741,8 @@ NAME_COLORS = (
 )
 REPLY_H = 40
 REACT_H = 30
+REACT_GAP = 5             # между чипами
+REACT_FACES = 3           # больше лиц не помещается — дальше счётчик
 FWD_H = 41
 
 
@@ -787,7 +797,7 @@ def _measure(msg: Msg, th: Theme) -> dict:
     max_bubble_w = PX(SCREEN_W_PT * th.max_bubble)
 
     if msg.kind == "videonote":
-        extra = PX(REACT_H + 6) if msg.reaction else 0
+        extra = (reactions_size(msg, PX(SCREEN_W_PT) - PX(80))[1] + PX(6)) if msg.reactions else 0
         return dict(kind=msg.kind, lines=[], line_h=0, w=PX(VNOTE_D), h=PX(VNOTE_D) + extra,
                     time_inline=False, time_w=0, photo_h=0, photo_w=0, inset=0,
                     emoji_px=PX(th.font_pt * 1.15))
@@ -813,7 +823,8 @@ def _measure(msg: Msg, th: Theme) -> dict:
     if msg.kind == "voice":
         w = PX(290 + min(1.0, _dur_seconds(msg.duration) / 60) * 38)
         return dict(kind=msg.kind, lines=[], line_h=0, w=int(w),
-                    h=PX(VOICE_H) + (PX(REACT_H + 4) if msg.reaction else 0),
+                    h=PX(VOICE_H) + (reactions_size(msg, PX(SCREEN_W_PT * th.max_bubble) - PX(PAD_X) * 2)[1] + PX(4)
+                                     if msg.reactions else 0),
                     time_inline=False, time_w=0, photo_h=0, photo_w=0, inset=0,
                     emoji_px=PX(th.font_pt * 1.15))
     if msg.kind in ("file", "call"):
@@ -822,7 +833,7 @@ def _measure(msg: Msg, th: Theme) -> dict:
         w = int(min(max_bubble_w, PX(VOICE_PLAY_D + 34) + fw + PX(24)))
         return dict(kind=msg.kind, lines=[], line_h=0, w=w,
                     h=PX(FILE_H if msg.kind == "file" else CALL_H)
-                      + (PX(REACT_H + 4) if msg.reaction else 0),
+                      + (reactions_size(msg, PX(SCREEN_W_PT * th.max_bubble) - PX(PAD_X) * 2)[1] + PX(4) if msg.reactions else 0),
                     time_inline=False, time_w=0, photo_h=0, photo_w=0, inset=0,
                     emoji_px=PX(th.font_pt * 1.15))
 
@@ -841,9 +852,7 @@ def _measure(msg: Msg, th: Theme) -> dict:
             lines, time_inline = narrow, True
     text_w = max((measure(l, f, emoji_px) for l in lines), default=0)
 
-    react_w = 0
-    if msg.reaction:
-        react_w = PX(16) + PX(REACT_H * 0.62) + PX(6) + int(font(13.5, 600).getlength(str(msg.reaction_count)))
+    react_w, react_h = reactions_size(msg, PX(SCREEN_W_PT * th.max_bubble) - PX(PAD_X) * 2)
 
     name_w = 0
     if msg.sender:
@@ -888,9 +897,9 @@ def _measure(msg: Msg, th: Theme) -> dict:
         h += line_h * len(lines)
     if lines and not time_inline:
         h += PX(TIME_PT * 1.2)
-    if msg.reaction:
-        h += PX(REACT_H) + PX(5)
-    if photo_h and not lines and not msg.reaction:
+    if msg.reactions:
+        h += react_h + PX(5)
+    if photo_h and not lines and not msg.reactions:
         bubble_h = h
     else:
         bubble_h = h + PX(PAD_Y) * 2
@@ -927,26 +936,73 @@ def _transcribe_btn(d: ImageDraw.ImageDraw, x: int, y: int, accent, bg) -> None:
     d.text((x + PX(23), y + PX(8)), "A", font=font(14, 600), fill=accent)
 
 
-def _reaction_chip(layer: Image.Image, d: ImageDraw.ImageDraw, msg: Msg, th: Theme,
-                   x: int, y: int, text_color) -> int:
-    """Чип реакции: эмодзи и либо аватарка автора, либо счётчик. Возвращает ширину."""
+def _chip_width(r: Reaction) -> int:
     ew = PX(REACT_H * 0.66)
-    solo = msg.reaction_count <= 1
-    tail_w = ew if solo else int(font(14, 600).getlength(str(msg.reaction_count)))
-    cw = PX(9) + ew + PX(5) + tail_w + PX(9)
-    d.rounded_rectangle((x, y, x + cw, y + PX(REACT_H)), radius=PX(REACT_H / 2),
-                        fill=th.chip_out if msg.out else th.header_accent[:3] + (80,))
-    em = render_emoji(msg.reaction, int(ew))
-    if em is not None:
-        layer.alpha_composite(em, (x + PX(9), int(y + (PX(REACT_H) - ew) / 2)))
-    if solo:
-        av = (_avatar(int(ew), msg.reactor, msg.reactor_photo, msg.reactor_color)
-              if (msg.reactor or msg.reactor_photo) else _blank_avatar(int(ew)))
-        layer.alpha_composite(av, (x + PX(9) + int(ew) + PX(5), int(y + (PX(REACT_H) - ew) / 2)))
+    if r.count <= REACT_FACES:
+        tail = r.count * ew + (r.count - 1) * PX(2)
     else:
-        d.text((x + PX(9) + ew + PX(5), y + PX(5)), str(msg.reaction_count),
-               font=font(14, 600), fill=text_color)
-    return cw
+        tail = int(font(14, 600).getlength(str(r.count)))
+    return PX(9) + ew + PX(5) + tail + PX(9)
+
+
+def reactions_rows(msg: Msg, max_w: int) -> list:
+    """Раскладывает чипы по строкам: в один ряд они влезают не всегда."""
+    rows, cur, cur_w = [], [], 0
+    for r in msg.reactions:
+        w = _chip_width(r)
+        if cur and cur_w + PX(REACT_GAP) + w > max_w:
+            rows.append((cur, cur_w))
+            cur, cur_w = [r], w
+        else:
+            cur_w += w + (PX(REACT_GAP) if cur else 0)
+            cur.append(r)
+    if cur:
+        rows.append((cur, cur_w))
+    return rows
+
+
+def reactions_size(msg: Msg, max_w: int) -> tuple:
+    """(ширина, высота) блока реакций. Без реакций — нули."""
+    if not msg.reactions:
+        return 0, 0
+    rows = reactions_rows(msg, max_w)
+    return (max(w for _, w in rows),
+            len(rows) * PX(REACT_H) + (len(rows) - 1) * PX(4))
+
+
+def _draw_reactions(layer: Image.Image, d: ImageDraw.ImageDraw, msg: Msg, th: Theme,
+                    x0: int, y0: int, max_w: int, text_color) -> int:
+    """Рисует все чипы. Свою реакцию телеграм подсвечивает заливкой."""
+    ew = PX(REACT_H * 0.66)
+    y = y0
+    for row, _ in reactions_rows(msg, max_w):
+        x = x0
+        for r in row:
+            w = _chip_width(r)
+            if r.mine:
+                fill = th.header_accent[:3] + (210,)
+            else:
+                fill = th.chip_out if msg.out else th.header_accent[:3] + (80,)
+            d.rounded_rectangle((x, y, x + w, y + PX(REACT_H)),
+                                radius=PX(REACT_H / 2), fill=fill)
+            em = render_emoji(r.emoji, int(ew))
+            if em is not None:
+                layer.alpha_composite(em, (x + PX(9), int(y + (PX(REACT_H) - ew) / 2)))
+            tx = x + PX(9) + int(ew) + PX(5)
+            if r.count <= REACT_FACES:
+                for i in range(r.count):
+                    img = r.avatars[i] if i < len(r.avatars) else None
+                    col = r.colors[i] if i < len(r.colors) else None
+                    nm = r.names[i] if i < len(r.names) else ""
+                    face = (_avatar(int(ew), nm, img, col) if (img or nm)
+                            else _blank_avatar(int(ew)))
+                    layer.alpha_composite(face, (tx, int(y + (PX(REACT_H) - ew) / 2)))
+                    tx += int(ew) + PX(2)
+            else:
+                d.text((tx, y + PX(5)), str(r.count), font=font(14, 600), fill=text_color)
+            x += w + PX(REACT_GAP)
+        y += PX(REACT_H) + PX(4)
+    return y - y0 - PX(4)
 
 
 def _draw_media_row(layer, d, msg: Msg, th: Theme, m: dict, text_color, time_color, ft) -> None:
@@ -956,7 +1012,8 @@ def _draw_media_row(layer, d, msg: Msg, th: Theme, m: dict, text_color, time_col
     glyph_color = th.bubble_out[:3] + (255,) if msg.out else (255, 255, 255, 255)
     # иконку центрируем по содержимому, а не по всему пузырю: с реакцией он
     # выше, и круг уезжал вниз, налезая на чип
-    content_h = h - (PX(REACT_H + 4) if msg.reaction else 0)
+    content_h = h - ((reactions_size(msg, w - PX(PAD_X) * 2)[1] + PX(4))
+                     if msg.reactions else 0)
     cx = PX(11) + PX(VOICE_PLAY_D) // 2
     cy = PX(33) if m["kind"] == "voice" else content_h // 2
 
@@ -988,8 +1045,10 @@ def _draw_media_row(layer, d, msg: Msg, th: Theme, m: dict, text_color, time_col
         d.text((PX(WAVE_X + 11), PX(34)), msg.duration or "не отвечено",
                font=font(14), fill=time_color)
 
-    if msg.reaction:
-        _reaction_chip(layer, d, msg, th, PX(PAD_X), h - PX(REACT_H) - PX(6), text_color)
+    if msg.reactions:
+        rh = reactions_size(msg, w - PX(PAD_X) * 2)[1]
+        _draw_reactions(layer, d, msg, th, PX(PAD_X), h - rh - PX(6),
+                        w - PX(PAD_X) * 2, text_color)
 
     tw = int(ft.getlength(msg.time))
     tx = w - PX(PAD_X) - tw - (PX(TICK_W) if msg.out else 0)
@@ -1060,18 +1119,11 @@ def _draw_bare(canvas: Image.Image, msg: Msg, th: Theme, m: dict, x: int, y: int
 
     canvas.alpha_composite(layer, (x, y))
 
-    if msg.reaction:                       # реакция уходит ПОД кружок, отдельным чипом
-        rl = Image.new("RGBA", (PX(90), PX(REACT_H)), (0, 0, 0, 0))
+    if msg.reactions:                      # у кружка чипы уходят ПОД него
+        rw, rh = reactions_size(msg, PX(SCREEN_W_PT) - PX(80))
+        rl = Image.new("RGBA", (rw + PX(8), rh + PX(4)), (0, 0, 0, 0))
         rd = ImageDraw.Draw(rl)
-        ew = PX(REACT_H * 0.66)
-        rd.rounded_rectangle((0, 0, PX(9) + ew * 2 + PX(14), PX(REACT_H)),
-                             radius=PX(REACT_H / 2), fill=th.header_accent[:3] + (80,))
-        em = render_emoji(msg.reaction, int(ew))
-        if em is not None:
-            rl.alpha_composite(em, (PX(9), int((PX(REACT_H) - ew) / 2)))
-        rl.alpha_composite(_avatar(int(ew), msg.reactor, msg.reactor_photo, msg.reactor_color)
-                           if (msg.reactor or msg.reactor_photo) else _blank_avatar(int(ew)),
-                           (PX(9) + int(ew) + PX(5), int((PX(REACT_H) - ew) / 2)))
+        _draw_reactions(rl, rd, msg, th, 0, 0, rw, (255, 255, 255, 235))
         canvas.alpha_composite(rl, (x, y + D + PX(6)))
 
 
@@ -1148,9 +1200,10 @@ def _draw_bubble(canvas: Image.Image, msg: Msg, th: Theme, m: dict,
                   m["line_h"], link_fill=link_color)
         cy += m["line_h"]
 
-    if msg.reaction:
-        _reaction_chip(layer, d, msg, th, PX(PAD_X), cy, text_color)
-        cy += PX(REACT_H) + PX(5)
+    if msg.reactions:
+        used = _draw_reactions(layer, d, msg, th, PX(PAD_X), cy,
+                               w - PX(PAD_X) * 2, text_color)
+        cy += used + PX(5)
 
     # время: либо в хвосте последней строки, либо отдельной строкой справа
     tw = int(ft.getlength(msg.time))

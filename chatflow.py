@@ -201,11 +201,11 @@ def describe(draft: dict) -> str:
             }.get(it["kind"], it["kind"])
             mark = "↩️ " if it.get("reply_to") is not None else ""
             react = ""
-            if it.get("reaction"):
-                react = f" {it['reaction']}"
-                if it.get("reactor") is not None:
-                    # в скобках, чтобы не склонять имя: «от Валентина Петровна»
-                    react += f" ({e(sender_name(draft, it['reactor']))})"
+            for r in it.get("reactions", []):
+                # имена в скобках, чтобы не склонять: «от Валентина Петровна».
+                # переменную НЕ звать who: снаружи так зовут текущего говорящего
+                names = ", ".join(sender_name(draft, i) for i in r.get("by", []))
+                react += f" {r['emoji']}({e(names)})"
             lines.append(f"{i}. {mark}<b>{e(name)}:</b> {e(str(body))}{react}  ·{t}")
 
     lines += [
@@ -236,7 +236,10 @@ def _preview_msgs(draft: dict) -> list:
         out.append(chatgen.Msg(
             text=it.get("text", ""), out=it["out"], time=t, kind=it["kind"],
             duration=it.get("duration", ""), file_name=it.get("file_name", ""),
-            sticker=it.get("sticker", ""), reaction=it.get("reaction"),
+            sticker=it.get("sticker", ""),
+            reactions=[chatgen.Reaction(emoji=r["emoji"], count=len(r.get("by", [])),
+                                        mine=(-1 in r.get("by", [])))
+                       for r in it.get("reactions", [])],
             sender=(sender_name(draft, item_sender(draft, it))
                     if (is_group(draft) and item_sender(draft, it) >= 0) else None),
             reply_name="x" if it.get("reply_to") is not None else None,
@@ -350,33 +353,33 @@ async def build_messages(bot: Bot, draft: dict) -> list:
                     cache[fid] = await _img(bot, fid)
                 sender_ava = cache[fid]
 
-        # чья реакция — того и аватарка в чипе. В группе автора выбирают
-        # явно, в переписке на двоих это всегда «другая сторона»
-        reactor_photo = None
-        reactor_name = None
-        reactor_color = None
-        if it.get("reaction"):
-            r = it.get("reactor")
-            if r is not None:
-                reactor_name = sender_name(draft, r)
-                reactor_color = r if r >= 0 else None
-                members = draft.get("members", [])
-                fid = (draft.get("my_avatar") if r < 0
-                       else (members[r].get("avatar") if r < len(members) else None))
-            else:
-                fid = draft.get("contact_avatar") if it["out"] else draft.get("my_avatar")
-            if fid:
-                if (fid, "RGB") not in cache:
-                    cache[(fid, "RGB")] = await _img(bot, fid)
-                reactor_photo = cache[(fid, "RGB")]
+        # чипы реакций: лица первых нескольких, дальше только счётчик
+        members = draft.get("members", [])
+        reactions = []
+        for r in it.get("reactions", []):
+            by = r.get("by", [])
+            avatars, colors, names = [], [], []
+            for idx in by[:chatgen.REACT_FACES]:
+                names.append(sender_name(draft, idx))
+                fid = (draft.get("my_avatar") if idx < 0
+                       else (members[idx].get("avatar") if idx < len(members) else None))
+                img = None
+                if fid:
+                    if (fid, "RGB") not in cache:
+                        cache[(fid, "RGB")] = await _img(bot, fid)
+                    img = cache[(fid, "RGB")]
+                avatars.append(img)
+                colors.append(idx if idx >= 0 else None)
+            reactions.append(chatgen.Reaction(
+                emoji=r["emoji"], count=len(by), mine=(-1 in by),
+                avatars=avatars, colors=colors, names=names))
         msgs.append(chatgen.Msg(
             text=it.get("text", ""), out=it["out"], time=t,
             kind=it["kind"] if it["kind"] != "date" else "text",
             photo=photo, duration=it.get("duration", ""),
             file_name=it.get("file_name", ""), file_size=it.get("file_size", ""),
             call_missed=bool(it.get("call_missed")), sticker=it.get("sticker", ""),
-            reaction=it.get("reaction"), reactor_photo=reactor_photo,
-            reactor=reactor_name, reactor_color=reactor_color,
+            reactions=reactions,
             sender=(sender_name(draft, sender_idx)
                     if (is_group(draft) and sender_idx >= 0) else None),
             sender_color=sender_idx if sender_idx >= 0 else 0,
@@ -870,6 +873,19 @@ async def undo(callback: CallbackQuery, state: FSMContext) -> None:
     await show_builder(callback.message, draft, edit=True)
 
 
+def add_reaction(draft: dict, emoji: str, who: int) -> None:
+    """Копит реакции на последней реплике: одинаковые складываются в один чип,
+    разные становятся отдельными. Один человек дважды не считается."""
+    item = draft["items"][-1]
+    rs = item.setdefault("reactions", [])
+    for r in rs:
+        if r["emoji"] == emoji:
+            if who not in r["by"]:
+                r["by"].append(who)
+            return
+    rs.append({"emoji": emoji, "by": [who]})
+
+
 def _people(draft: dict) -> list:
     return ([(-1, draft["my_name"])]
             + [(i, m["name"]) for i, m in enumerate(draft.get("members", []))])
@@ -1032,14 +1048,17 @@ async def ask_reaction(callback: CallbackQuery, state: FSMContext) -> None:
 async def set_reaction(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     draft = data["draft"]
-    draft["items"][-1]["reaction"] = callback.data.split("chat:setreact:")[1]
-    await state.update_data(draft=draft)
+    emoji = callback.data.split("chat:setreact:")[1]
     await callback.answer()
     if is_group(draft):
         # в группе реакцию мог поставить кто угодно, поэтому спрашиваем
+        await state.update_data(react_emoji=emoji)
         await callback.message.edit_text(
-            "кто поставил реакцию?", reply_markup=_people_kb(draft, "chat:reactor"))
+            "кто её поставил?", reply_markup=_people_kb(draft, "chat:reactor"))
         return
+    # в переписке на двоих реакция всегда от той стороны, что не писала реплику
+    add_reaction(draft, emoji, 0 if draft["items"][-1]["out"] else -1)
+    await state.update_data(draft=draft)
     await show_builder(callback.message, draft, edit=True)
 
 
@@ -1047,7 +1066,7 @@ async def set_reaction(callback: CallbackQuery, state: FSMContext) -> None:
 async def set_reactor(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     draft = data["draft"]
-    draft["items"][-1]["reactor"] = int(callback.data.split(":")[2])
+    add_reaction(draft, data.get("react_emoji", "👍"), int(callback.data.split(":")[2]))
     await state.update_data(draft=draft)
     await callback.answer()
     await show_builder(callback.message, draft, edit=True)

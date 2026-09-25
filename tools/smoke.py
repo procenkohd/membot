@@ -60,7 +60,11 @@ def build_draft(theme: str, mode: str) -> dict:
             extra = {"sticker": "🗿"}
         chatflow._add(d, kind=kind, text="проверка 🔥" if kind in ("text", "photo") else "",
                       **extra)
-    d["items"][1]["reaction"] = "😁"
+    # реакции: один человек, несколько и «больше лиц, чем влезает»
+    d["items"][1]["reactions"] = [{"emoji": "😁", "by": [-1]}]
+    d["items"][2]["reactions"] = [{"emoji": "🔥", "by": [0, -1]},
+                                  {"emoji": "🤡", "by": [0]}]
+    d["items"][4]["reactions"] = [{"emoji": "💀", "by": list(range(-1, 7))}]
     d["items"][2]["reply_to"] = 0
     d["items"][3]["date"] = "Сегодня"
     return d
