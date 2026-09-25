@@ -264,7 +264,7 @@ def builder_kb(draft: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="❤️ реакция", callback_data="chat:react"),
          InlineKeyboardButton(text=f"{reply_mark} ответом", callback_data="chat:reply")],
         [InlineKeyboardButton(text="📅 дата", callback_data="chat:add:date")]
-        + ([InlineKeyboardButton(text="👋 вход/выход", callback_data="chat:svc")]
+        + ([InlineKeyboardButton(text="👋 вошёл / вышел", callback_data="chat:svc")]
            if is_group(draft) else []),
         [InlineKeyboardButton(text="🗑 убрать последнее", callback_data="chat:undo"),
          InlineKeyboardButton(text="✅ готово, рисуй", callback_data="chat:render")],
@@ -827,7 +827,7 @@ async def service_who(callback: CallbackQuery, state: FSMContext) -> None:
              for i, name in people[k:k + 2]] for k in range(0, len(people), 2)]
     rows.append([InlineKeyboardButton(text="← назад", callback_data="chat:back")])
     await callback.answer()
-    await callback.message.edit_text("про кого строчка?",
+    await callback.message.edit_text("кто вошёл или вышел?",
                                      reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
@@ -841,7 +841,7 @@ async def service_phrase(callback: CallbackQuery, state: FSMContext) -> None:
                  InlineKeyboardButton(text="← назад", callback_data="chat:back")])
     await callback.answer()
     await callback.message.edit_text(
-        "что произошло? род телеграм согласует, поэтому выбери подходящее",
+        "что произошло? выбирай с правильным родом — телеграм пишет именно так",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
