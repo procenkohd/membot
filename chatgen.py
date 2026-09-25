@@ -756,6 +756,16 @@ def _measure(msg: Msg, th: Theme) -> dict:
         return dict(kind=msg.kind, lines=[], line_h=0, w=PX(VNOTE_D), h=PX(VNOTE_D) + extra,
                     time_inline=False, time_w=0, photo_h=0, photo_w=0, inset=0,
                     emoji_px=PX(th.font_pt * 1.15))
+    if msg.kind == "service":
+        f13 = font(13, 600)
+        max_w = PX(SCREEN_W_PT) - PX(60)
+        lines = wrap_text(msg.text, f13, max_w, PX(15)) or [""]
+        tw = max(int(f13.getlength(l)) for l in lines)
+        return dict(kind=msg.kind, lines=lines, line_h=PX(17),
+                    w=tw + PX(22), h=PX(8) + PX(17) * len(lines) + PX(8),
+                    time_inline=False, time_w=0, photo_h=0, photo_w=0, inset=0,
+                    emoji_px=PX(15))
+
     if msg.kind == "sticker":
         sw = sh = PX(STICKER_D)
         if msg.photo is not None:          # настоящий стикер бывает не квадратным
@@ -952,6 +962,20 @@ def _draw_media_row(layer, d, msg: Msg, th: Theme, m: dict, text_color, time_col
     d.text((tx, ty), msg.time, font=ft, fill=time_color)
     if msg.out:
         _tick(layer, tx + tw + PX(TICK_GAP), ty + PX(3.0), th.tick, msg.read)
+
+
+def _draw_service(canvas: Image.Image, msg: Msg, th: Theme, m: dict, x: int, y: int) -> None:
+    """Служебная строка («X покинул группу») — центрированная плашка без пузыря
+    и без хвостика, как разделитель даты."""
+    layer, d = overlay(canvas)
+    w, h = m["w"], m["h"]
+    d.rounded_rectangle((x, y, x + w, y + h), radius=h // 2, fill=(0, 0, 0, 105))
+    f13 = font(13, 600)
+    for i, line in enumerate(m["lines"]):
+        lw = int(f13.getlength(line))
+        d.text((x + (w - lw) / 2, y + PX(7) + i * m["line_h"]), line,
+               font=f13, fill=(255, 255, 255, 230))
+    canvas.alpha_composite(layer)
 
 
 def _draw_bare(canvas: Image.Image, msg: Msg, th: Theme, m: dict, x: int, y: int) -> None:
@@ -1353,6 +1377,7 @@ def prep_runs(messages: Sequence, group: bool = False) -> list:
     out, prev = [], None
     for m in messages:
         first = (prev is None or prev.out != m.out
+                 or m.kind == "service" or prev.kind == "service"
                  or (group and prev.sender != m.sender))
         out.append(replace(m, first_of_run=first,
                            sender=m.sender if (first and group) else None))
@@ -1446,14 +1471,19 @@ def make_chat_screenshot(messages: Sequence[Msg], *, theme: str = "ios_dark",
             run_name = m.sender or ""     # у продолжений имя стёрто, помним его
         nxt = msgs[i + 1] if i + 1 < len(msgs) else None
         last_of_run = nxt is None or nxt.first_of_run
-        indent = PX(GROUP_INDENT) if (group and not m.out) else 0
-        x = W - PX(EDGE) - mm["w"] if m.out else PX(EDGE) + indent
+        if mm["kind"] == "service":
+            x = (W - mm["w"]) // 2
+        else:
+            indent = PX(GROUP_INDENT) if (group and not m.out) else 0
+            x = W - PX(EDGE) - mm["w"] if m.out else PX(EDGE) + indent
         if y + mm["h"] > area_top - PX(40):
-            if mm["kind"] in ("videonote", "sticker"):
+            if mm["kind"] == "service":
+                _draw_service(canvas, m, th, mm, x, y)
+            elif mm["kind"] in ("videonote", "sticker"):
                 _draw_bare(canvas, m, th, mm, x, y)
             else:
                 _draw_bubble(canvas, m, th, mm, x, y, last_of_run, grad)
-            if group and not m.out and last_of_run:
+            if group and not m.out and last_of_run and mm["kind"] != "service":
                 ava = _avatar(PX(GROUP_AVA_D), run_name, m.avatar, m.sender_color)
                 canvas.alpha_composite(ava, (PX(6), y + mm["h"] - PX(GROUP_AVA_D)))
         y += mm["h"]

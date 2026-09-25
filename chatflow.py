@@ -61,6 +61,7 @@ class ChatStates(StatesGroup):
     member_avatar = State()     # ждём его аватарку
     group_size = State()        # сколько всего человек написать в шапке
     group_online = State()      # сколько из них «в сети»
+    wait_service = State()      # ждём свой текст служебной строки
 
 
 # ---------- черновик ----------
@@ -183,6 +184,9 @@ def describe(draft: dict) -> str:
             lines.append(f"…и ещё {len(shown) - VISIBLE_ITEMS} выше")
             shown = shown[-VISIBLE_ITEMS:]
         for i, (it, t) in shown:
+            if it["kind"] == "service":
+                lines.append(f"{i}. ── {e(it.get('text', ''))}")
+                continue
             name = sender_name(draft, item_sender(draft, it))
             body = {
                 "text": it.get("text", ""),
@@ -221,6 +225,9 @@ def _preview_msgs(draft: dict) -> list:
     разъедется переписка. Скачивать ради счётчика фото было бы расточительно."""
     out = []
     for it, t in zip(draft["items"], item_times(draft)):
+        if it["kind"] == "service":
+            out.append(chatgen.Msg(kind="service", text=it.get("text", "")))
+            continue
         out.append(chatgen.Msg(
             text=it.get("text", ""), out=it["out"], time=t, kind=it["kind"],
             duration=it.get("duration", ""), file_name=it.get("file_name", ""),
@@ -256,9 +263,11 @@ def builder_kb(draft: dict) -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="📞 звонок", callback_data="chat:add:call")],
         [InlineKeyboardButton(text="❤️ реакция", callback_data="chat:react"),
          InlineKeyboardButton(text=f"{reply_mark} ответом", callback_data="chat:reply")],
-        [InlineKeyboardButton(text="📅 дата", callback_data="chat:add:date"),
-         InlineKeyboardButton(text="🗑 убрать последнее", callback_data="chat:undo")],
-        [InlineKeyboardButton(text="✅ готово, рисуй", callback_data="chat:render")],
+        [InlineKeyboardButton(text="📅 дата", callback_data="chat:add:date")]
+        + ([InlineKeyboardButton(text="👋 вход/выход", callback_data="chat:svc")]
+           if is_group(draft) else []),
+        [InlineKeyboardButton(text="🗑 убрать последнее", callback_data="chat:undo"),
+         InlineKeyboardButton(text="✅ готово, рисуй", callback_data="chat:render")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -308,6 +317,10 @@ async def build_messages(bot: Bot, draft: dict) -> list:
     times = item_times(draft)
     msgs, cache = [], {}
     for i, (it, t) in enumerate(zip(draft["items"], times)):
+        if it["kind"] == "service":
+            msgs.append(chatgen.Msg(kind="service", text=it.get("text", ""),
+                                    date=it.get("date")))
+            continue
         photo = None
         fid = it.get("photo")
         if fid:
@@ -679,6 +692,14 @@ async def pick_step(callback: CallbackQuery, state: FSMContext) -> None:
 
 # ---------- конструктор ----------
 
+# Телеграм согласует служебные строки по роду, а род участника мы не знаем —
+# поэтому не угадываем, а даём выбрать готовую формулировку.
+SERVICE_PHRASES = (
+    "присоединился к группе", "присоединилась к группе",
+    "покинул группу", "покинула группу",
+    "вернулся в группу", "вернулась в группу",
+)
+
 REPLY_LABELS = {
     "photo": "Фото", "voice": "Голосовое сообщение", "videonote": "Видеосообщение",
     "sticker": "Стикер", "file": "Файл", "call": "Звонок",
@@ -794,6 +815,67 @@ async def undo(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(draft=draft)
     await callback.answer("убрал")
     await show_builder(callback.message, draft, edit=True)
+
+
+@router.callback_query(ChatStates.builder, F.data == "chat:svc")
+async def service_who(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    draft = data["draft"]
+    people = [(-1, draft["my_name"])]
+    people += [(i, m["name"]) for i, m in enumerate(draft.get("members", []))]
+    rows = [[InlineKeyboardButton(text=name[:18], callback_data=f"chat:svcw:{i}")
+             for i, name in people[k:k + 2]] for k in range(0, len(people), 2)]
+    rows.append([InlineKeyboardButton(text="← назад", callback_data="chat:back")])
+    await callback.answer()
+    await callback.message.edit_text("про кого строчка?",
+                                     reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@router.callback_query(ChatStates.builder, F.data.startswith("chat:svcw:"))
+async def service_phrase(callback: CallbackQuery, state: FSMContext) -> None:
+    idx = int(callback.data.split(":")[2])
+    await state.update_data(svc_who=idx)
+    rows = [[InlineKeyboardButton(text=ph, callback_data=f"chat:svcp:{i}")]
+            for i, ph in enumerate(SERVICE_PHRASES)]
+    rows.append([InlineKeyboardButton(text="свой текст", callback_data="chat:svcp:own"),
+                 InlineKeyboardButton(text="← назад", callback_data="chat:back")])
+    await callback.answer()
+    await callback.message.edit_text(
+        "что произошло? род телеграм согласует, поэтому выбери подходящее",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+def _add_service(draft: dict, text: str) -> None:
+    """Служебная строка ничья: у неё нет автора, хвостика и времени."""
+    draft["items"].append({"kind": "service", "out": False, "text": text[:80]})
+
+
+@router.callback_query(ChatStates.builder, F.data.startswith("chat:svcp:"))
+async def service_done(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    draft = data["draft"]
+    what = callback.data.split("chat:svcp:", 1)[1]
+    if what == "own":
+        await state.set_state(ChatStates.wait_service)
+        await callback.answer()
+        await callback.message.edit_text(
+            "напиши строчку целиком, например «Аню добавил в группу Миша»")
+        return
+    who = sender_name(draft, data.get("svc_who", -1))
+    _add_service(draft, f"{who} {SERVICE_PHRASES[int(what)]}")
+    await state.update_data(draft=draft)
+    await callback.answer()
+    await show_builder(callback.message, draft, edit=True)
+
+
+@router.message(ChatStates.wait_service, F.text)
+async def service_custom(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    draft = data["draft"]
+    _add_service(draft, message.text.strip())
+    await state.update_data(draft=draft)
+    await state.set_state(ChatStates.builder)
+    await show_builder(message, draft, state=state)
 
 
 @router.callback_query(ChatStates.builder, F.data == "chat:react")
