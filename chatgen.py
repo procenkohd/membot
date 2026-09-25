@@ -538,34 +538,48 @@ class Theme:
     dark: bool = True
 
 
+# Тёмная основа: у тёмных тем отличаются только обои, узор и цвет пузыря.
+_DARK = dict(font_pt=17.6, max_bubble=0.795)
+
 THEMES = {
     "ios_dark": Theme(
-        key="ios_dark",
-        title="тёмная (дефолт)",
+        key="ios_dark", title="тёмная",
         wallpaper=((28, 38, 52), (22, 30, 43), (18, 25, 36), (30, 41, 56)),
-        bubble_in=(39, 39, 42, 240),
-        bubble_out=(60, 120, 228, 255),
+        bubble_in=(39, 39, 42, 240), bubble_out=(60, 120, 228, 255),
         bubble_out_grad=((74, 138, 244), (86, 150, 250), (46, 100, 214), (58, 112, 226)),
-        font_pt=17.6,
-        max_bubble=0.795,
-    ),
+        **_DARK),
     "ios_teal": Theme(
-        key="ios_teal",
-        title="бирюзовая (как у тебя)",
+        key="ios_teal", title="чёрная с узором",
         # обои у референса — чистый чёрный с узором, а не тёмно-синий градиент
         wallpaper=((0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0)),
-        pattern="snow",
-        pattern_color=(26, 54, 92, 150),
-        bubble_in=(32, 30, 35, 250),
-        bubble_out=(66, 148, 172, 255),
+        pattern="snow", pattern_color=(26, 54, 92, 150),
+        bubble_in=(32, 30, 35, 250), bubble_out=(66, 148, 172, 255),
         # диагональ: бирюза справа-сверху, синий слева-снизу
         bubble_out_grad=((69, 154, 166), (78, 172, 187), (53, 122, 192), (78, 172, 190)),
-        time_out=(255, 255, 255, 190),
-        header_bg=(28, 28, 30, 205),
-        glass_header=True,
-        font_pt=17.6,
-        max_bubble=0.795,
-    ),
+        time_out=(255, 255, 255, 190), header_bg=(28, 28, 30, 205), glass_header=True,
+        **_DARK),
+    "dark_doodle": Theme(
+        key="dark_doodle", title="тёмная с дудлами",
+        wallpaper=((38, 42, 50), (30, 34, 42), (26, 30, 38), (40, 45, 54)),
+        pattern="doodle", pattern_color=(255, 255, 255, 26),
+        bubble_in=(48, 50, 56, 240), bubble_out=(60, 120, 228, 255),
+        bubble_out_grad=((74, 138, 244), (86, 150, 250), (46, 100, 214), (58, 112, 226)),
+        **_DARK),
+    "night": Theme(
+        key="night", title="ночь",
+        wallpaper=((44, 32, 78), (32, 30, 70), (24, 22, 54), (52, 36, 84)),
+        pattern="snow", pattern_color=(150, 130, 220, 40),
+        bubble_in=(46, 42, 62, 240), bubble_out=(108, 88, 214, 255),
+        bubble_out_grad=((132, 108, 232), (150, 118, 238), (88, 72, 196), (112, 92, 214)),
+        **_DARK),
+    "graphite": Theme(
+        key="graphite", title="графит",
+        wallpaper=((58, 58, 60), (48, 48, 50), (40, 40, 42), (62, 62, 65)),
+        pattern="doodle", pattern_color=(255, 255, 255, 20),
+        bubble_in=(72, 72, 76, 240), bubble_out=(60, 120, 228, 255),
+        # серый пузырь на сером фоне читался как недорисованный — оставляем синий
+        bubble_out_grad=((74, 138, 244), (86, 150, 250), (46, 100, 214), (58, 112, 226)),
+        **_DARK),
 }
 
 # Светлая классика — общая основа для всех светлых тем: меняется только фон.
@@ -599,6 +613,15 @@ THEMES.update({
     "grad_violet": Theme(key="grad_violet", title="сиреневый градиент",
                          wallpaper=((176, 154, 224), (146, 156, 226),
                                     (198, 160, 218), (138, 148, 220)), **_LIGHT),
+    "grad_rose": Theme(key="grad_rose", title="розовый",
+                       wallpaper=((248, 178, 196), (240, 158, 186),
+                                  (252, 198, 194), (236, 166, 202)), **_LIGHT),
+    "grad_mint": Theme(key="grad_mint", title="мятный",
+                       wallpaper=((168, 226, 198), (148, 214, 206),
+                                  (196, 234, 186), (154, 220, 214)), **_LIGHT),
+    "paper": Theme(key="paper", title="бумага",
+                   wallpaper=((238, 228, 210), (232, 220, 200),
+                              (242, 234, 218), (228, 216, 198)), **_LIGHT),
 })
 
 
@@ -695,6 +718,28 @@ def _tick(layer: Image.Image, x: int, y: int, color, double: bool) -> None:
         d.line([pt(6.5, 7.2), pt(13.2, 0.4)], fill=color, width=lw)
     layer.alpha_composite(tile.resize((PX(TICK_BLOCK_W), PX(TICK_BLOCK_H)), Image.LANCZOS),
                           (int(x), int(y)))
+
+
+def _dur_seconds(text: str) -> int:
+    """Длительность «0:57» в секунды. От неё зависит ширина пузыря голосового."""
+    try:
+        m, sec = text.split(":")
+        return int(m) * 60 + int(sec)
+    except Exception:
+        return 30
+
+
+def _wave_heights(seed: str, n: int) -> list:
+    """Форма волны у голосового — псевдослучайная, но стабильная для одного
+    сообщения: иначе при перерисовке картинка «дёргалась» бы."""
+    rnd = random.Random(seed)
+    out = []
+    for i in range(n):
+        # две синусоиды разной частоты дают «речевой» рисунок с паузами,
+        # чистый рандом выглядит как ровная щётка
+        env = 0.45 + 0.55 * abs(math.sin(i / 7.3)) * abs(math.cos(i / 17.1 + 0.7))
+        out.append(max(0.07, min(1.0, env * rnd.uniform(0.25, 1.25))))
+    return out
 
 
 def _measure(msg: Msg, th: Theme) -> dict:

@@ -506,15 +506,14 @@ async def _ask_theme(message: Message, state: FSMContext) -> None:
     """Оформление показываем картинкой: словами «тема» человек понимает
     «о чём переписка», а не «как она выглядит»."""
     await state.set_state(ChatStates.settings)
+    # порядок кнопок обязан совпадать с порядком на превью: там номера
+    keys = list(chatgen.THEMES)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1 — тёмная", callback_data="chat:theme:ios_dark"),
-         InlineKeyboardButton(text="2 — с узором", callback_data="chat:theme:ios_teal"),
-         InlineKeyboardButton(text="3 — светлая", callback_data="chat:theme:light")],
-        [InlineKeyboardButton(text="4 — бирюзовый", callback_data="chat:theme:grad_sea"),
-         InlineKeyboardButton(text="5 — закат", callback_data="chat:theme:grad_sunset"),
-         InlineKeyboardButton(text="6 — сиреневый", callback_data="chat:theme:grad_violet")],
+        [InlineKeyboardButton(text=str(i + 1), callback_data=f"chat:theme:{k}")
+         for i, k in enumerate(keys)][row:row + 6]
+        for row in (0, 6)
     ])
-    caption = "как должен выглядеть чат? выбери вариант с картинки"
+    caption = "как должен выглядеть чат? жми номер с картинки"
     if THEME_PREVIEW.exists():
         await message.answer_photo(FSInputFile(THEME_PREVIEW), caption=caption, reply_markup=kb)
     else:
