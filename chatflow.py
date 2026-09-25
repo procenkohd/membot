@@ -59,6 +59,8 @@ class ChatStates(StatesGroup):
     wait_file_name = State()    # ждём название файла
     member_name = State()       # ждём имя очередного участника группы
     member_avatar = State()     # ждём его аватарку
+    group_size = State()        # сколько всего человек написать в шапке
+    group_online = State()      # сколько из них «в сети»
 
 
 # ---------- черновик ----------
@@ -71,11 +73,35 @@ def blank_draft() -> dict:
         # группа: участники кроме тебя и кто сейчас говорит (-1 — ты)
         "kind": "duo",
         "members": [],
+        # числа в шапке группы задаются отдельно: в реальной группе сотни
+        # человек, а в конструкторе добавляют трёх
+        "members_total": 0,
+        "members_online": 0,
         "speaker": -1,
         "speaker_out": False,      # False — пишет собеседник; только для duo
         "reply_next": False,       # следующая реплика будет ответом на предыдущую
         "items": [],
     }
+
+
+def plural(n: int, one: str, few: str, many: str) -> str:
+    """Русские окончания: 1 участник, 2 участника, 5 участников."""
+    tail = abs(n) % 100
+    if 11 <= tail <= 14:
+        return many
+    tail %= 10
+    if tail == 1:
+        return one
+    if 2 <= tail <= 4:
+        return few
+    return many
+
+
+def group_subtitle(draft: dict) -> str:
+    total = draft.get("members_total") or (len(draft.get("members", [])) + 1)
+    online = draft.get("members_online") or 0
+    text = f"{total} {plural(total, 'участник', 'участника', 'участников')}"
+    return f"{text}, {online} в сети" if online else text
 
 
 def is_group(draft: dict) -> bool:
@@ -163,7 +189,8 @@ def describe(draft: dict) -> str:
                 "photo": "🖼 фото" + (f": {it['text']}" if it.get("text") else ""),
                 "voice": f"🎤 голосовое {it.get('duration', '')}",
                 "videonote": f"⭕ кружок {it.get('duration', '')}",
-                "sticker": f"стикер {it.get('sticker', '')}",
+                "sticker": ("стикер " + (it.get("sticker") or "")
+                            + (" (свой)" if it.get("photo") else "")),
                 "file": f"📎 файл: {it.get('file_name', '')}",
                 "call": "📞 " + ("пропущенный звонок" if it.get("call_missed")
                                  else "входящий звонок"),
@@ -263,14 +290,16 @@ async def show_builder(message: Message, draft: dict, edit: bool = False,
 
 # ---------- сборка картинки ----------
 
-async def _img(bot: Bot, file_id: Optional[str]) -> Optional[Image.Image]:
+async def _img(bot: Bot, file_id: Optional[str], mode: str = "RGB") -> Optional[Image.Image]:
+    """mode="RGBA" нужен стикерам: у них прозрачный фон, и перевод в RGB его
+    заливает чёрным."""
     if not file_id:
         return None
     try:
         buf = BytesIO()
         await bot.download(file_id, destination=buf)
         buf.seek(0)
-        return Image.open(buf).convert("RGB")
+        return Image.open(buf).convert(mode)
     except Exception:
         return None
 
@@ -282,9 +311,11 @@ async def build_messages(bot: Bot, draft: dict) -> list:
         photo = None
         fid = it.get("photo")
         if fid:
-            if fid not in cache:
-                cache[fid] = await _img(bot, fid)
-            photo = cache[fid]
+            mode = "RGBA" if it["kind"] == "sticker" else "RGB"
+            key = (fid, mode)
+            if key not in cache:
+                cache[key] = await _img(bot, fid, mode)
+            photo = cache[key]
         reply_name = reply_text = None
         if it.get("reply_to") is not None:
             src = draft["items"][it["reply_to"]]
@@ -306,9 +337,9 @@ async def build_messages(bot: Bot, draft: dict) -> list:
         if it.get("reaction"):
             fid = draft.get("contact_avatar") if it["out"] else draft.get("my_avatar")
             if fid:
-                if fid not in cache:
-                    cache[fid] = await _img(bot, fid)
-                reactor_photo = cache[fid]
+                if (fid, "RGB") not in cache:
+                    cache[(fid, "RGB")] = await _img(bot, fid)
+                reactor_photo = cache[(fid, "RGB")]
         msgs.append(chatgen.Msg(
             text=it.get("text", ""), out=it["out"], time=t,
             kind=it["kind"] if it["kind"] != "date" else "text",
@@ -338,8 +369,7 @@ async def render_draft(bot: Bot, draft: dict) -> list:
     # рисование синхронное и на слабом ядре занимает заметное время — уводим в
     # поток, иначе на время отрисовки бот замирает для всех остальных
     group = is_group(draft)
-    subtitle = (f"{len(draft.get('members', [])) + 1} участника, 2 в сети"
-                if group else "был(а) недавно")
+    subtitle = group_subtitle(draft) if group else "был(а) недавно"
     return await asyncio.to_thread(
         chatgen.make_chat_pages, msgs, max_pages=MAX_PAGES, group=group,
         theme=draft["theme"], contact_name=draft["contact_name"] or "Контакт",
@@ -356,6 +386,83 @@ async def render_draft(bot: Bot, draft: dict) -> list:
 def skip_kb(text: str = "пропустить") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=text, callback_data=SKIP)]])
+
+
+def _num_kb(prefix: str, values: tuple) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=str(v), callback_data=f"{prefix}:{v}") for v in values[:4]],
+        [InlineKeyboardButton(text=str(v), callback_data=f"{prefix}:{v}") for v in values[4:]],
+    ])
+
+
+async def _ask_group_size(message: Message, state: FSMContext) -> None:
+    await state.set_state(ChatStates.group_size)
+    await message.answer(
+        "сколько человек в группе? это только для шапки — добавлять их всех не надо\n"
+        "можно нажать кнопку или написать своё число",
+        reply_markup=_num_kb("chat:size", (8, 23, 47, 128, 256, 512, 1024, 9999)))
+
+
+async def _ask_group_online(message: Message, state: FSMContext) -> None:
+    await state.set_state(ChatStates.group_online)
+    await message.answer("а сколько из них сейчас в сети?",
+                         reply_markup=_num_kb("chat:online", (0, 1, 2, 3, 5, 12, 40, 100)))
+
+
+async def _set_size(message: Message, state: FSMContext, value: int) -> None:
+    data = await state.get_data()
+    draft = data["draft"]
+    draft["members_total"] = max(1, min(value, 999999))
+    await state.update_data(draft=draft)
+    await _ask_group_online(message, state)
+
+
+async def _set_online(message: Message, state: FSMContext, value: int) -> None:
+    data = await state.get_data()
+    draft = data["draft"]
+    total = draft.get("members_total") or 1
+    draft["members_online"] = max(0, min(value, total))
+    await state.update_data(draft=draft)
+    await message.answer(f"в шапке будет: {group_subtitle(draft)}")
+    await _ask_theme(message, state)
+
+
+@router.callback_query(F.data.startswith("chat:size:"))
+async def pick_size(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await _set_size(callback.message, state, int(callback.data.split(":")[2]))
+
+
+@router.callback_query(F.data.startswith("chat:online:"))
+async def pick_online(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await _set_online(callback.message, state, int(callback.data.split(":")[2]))
+
+
+@router.message(ChatStates.group_size, F.text)
+async def typed_size(message: Message, state: FSMContext) -> None:
+    digits = "".join(c for c in message.text if c.isdigit())
+    if not digits:
+        await message.answer("нужно число, например 47")
+        return
+    await _set_size(message, state, int(digits))
+
+
+@router.message(ChatStates.group_online, F.text)
+async def typed_online(message: Message, state: FSMContext) -> None:
+    digits = "".join(c for c in message.text if c.isdigit())
+    if not digits:
+        await message.answer("нужно число, например 3")
+        return
+    await _set_online(message, state, int(digits))
 
 
 def mode_kb() -> InlineKeyboardMarkup:
@@ -472,7 +579,7 @@ async def _ask_more_members(message: Message, state: FSMContext, draft: dict) ->
     names = ", ".join(m["name"] for m in draft["members"])
     if len(draft["members"]) >= MAX_MEMBERS:
         await message.answer(f"участники: {names}. больше не влезет, идём дальше")
-        await _ask_theme(message, state)
+        await _ask_group_size(message, state)
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="➕ ещё участник", callback_data="chat:member:more"),
@@ -496,7 +603,7 @@ async def more_members(callback: CallbackQuery, state: FSMContext) -> None:
     if callback.data.endswith("more"):
         await _ask_member(callback.message, state, draft)
     else:
-        await _ask_theme(callback.message, state)
+        await _ask_group_size(callback.message, state)
 
 
 THEME_PREVIEW = Path(__file__).parent / "assets" / "theme_preview.jpg"
@@ -647,6 +754,34 @@ async def builder_photo(message: Message, state: FSMContext) -> None:
     await _save_and_refresh(message, state, draft)
 
 
+def _sticker_image_id(st) -> Optional[str]:
+    """Анимированные (.tgs) и видео (.webm) стикеры Pillow не откроет, поэтому
+    у них берём статичную превьюшку, которую телеграм отдаёт сам."""
+    if st.is_animated or st.is_video:
+        return st.thumbnail.file_id if st.thumbnail else None
+    return st.file_id
+
+
+@router.message(ChatStates.builder, F.sticker)
+async def builder_sticker(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    draft = data["draft"]
+    _add(draft, kind="sticker", photo=_sticker_image_id(message.sticker),
+         sticker=message.sticker.emoji or "🗿")
+    await _save_and_refresh(message, state, draft)
+
+
+@router.message(ChatStates.wait_sticker, F.sticker)
+async def sticker_from_sticker(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    draft = data["draft"]
+    _add(draft, kind="sticker", photo=_sticker_image_id(message.sticker),
+         sticker=message.sticker.emoji or "🗿")
+    await state.update_data(draft=draft)
+    await state.set_state(ChatStates.builder)
+    await show_builder(message, draft, state=state)
+
+
 @router.callback_query(ChatStates.builder, F.data == "chat:swap")
 async def swap_speaker(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
@@ -747,7 +882,7 @@ async def add_element(callback: CallbackQuery, state: FSMContext) -> None:
         rows.append([InlineKeyboardButton(text="← назад", callback_data="chat:back")])
         await state.set_state(ChatStates.wait_sticker)
         await callback.message.edit_text(
-            "выбери стикер или пришли любой эмодзи сообщением",
+            "выбери из готовых, пришли любой эмодзи или кинь свой стикер",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     elif kind == "file":
         await state.set_state(ChatStates.wait_file_name)

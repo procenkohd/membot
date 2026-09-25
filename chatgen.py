@@ -757,9 +757,13 @@ def _measure(msg: Msg, th: Theme) -> dict:
                     time_inline=False, time_w=0, photo_h=0, photo_w=0, inset=0,
                     emoji_px=PX(th.font_pt * 1.15))
     if msg.kind == "sticker":
-        return dict(kind=msg.kind, lines=[], line_h=0, w=PX(STICKER_D),
-                    h=PX(STICKER_D) + PX(24),
-                    time_inline=False, time_w=0, photo_h=0, photo_w=0, inset=0,
+        sw = sh = PX(STICKER_D)
+        if msg.photo is not None:          # настоящий стикер бывает не квадратным
+            pw, ph = msg.photo.size
+            k = PX(STICKER_D) / max(pw, ph)
+            sw, sh = max(1, round(pw * k)), max(1, round(ph * k))
+        return dict(kind=msg.kind, lines=[], line_h=0, w=sw, h=sh + PX(24),
+                    time_inline=False, time_w=0, photo_h=sh, photo_w=sw, inset=0,
                     emoji_px=PX(th.font_pt * 1.15))
     if msg.kind == "voice":
         w = PX(290 + min(1.0, _dur_seconds(msg.duration) / 60) * 38)
@@ -953,7 +957,8 @@ def _draw_media_row(layer, d, msg: Msg, th: Theme, m: dict, text_color, time_col
 def _draw_bare(canvas: Image.Image, msg: Msg, th: Theme, m: dict, x: int, y: int) -> None:
     """Кружок и стикер живут без пузыря — прямо на обоях."""
     D = m["w"]
-    layer = Image.new("RGBA", (D + PX(150), D + PX(40)), (0, 0, 0, 0))
+    layer = Image.new("RGBA", (max(D, m["photo_w"]) + PX(150), m["h"] + PX(40)),
+                      (0, 0, 0, 0))
     d = ImageDraw.Draw(layer)
     ft = font(TIME_PT, 500)
 
@@ -979,15 +984,20 @@ def _draw_bare(canvas: Image.Image, msg: Msg, th: Theme, m: dict, x: int, y: int
         d.line((mx + PX(13), my - PX(5), mx + PX(5), my + PX(5)), fill=(255, 255, 255, 235), width=PX(2))
         _transcribe_btn(d, D + PX(14), D - PX(78), th.header_accent, th.quote_bg)
         d.text((D + PX(66), D - PX(68)), msg.time, font=ft, fill=(255, 255, 255, 200))
-    else:  # стикер
-        em = render_emoji(msg.sticker or "🙂", D)
-        if em is not None:
-            layer.alpha_composite(em, (0, 0))
+    else:  # стикер: либо присланная картинка, либо эмодзи как запасной вариант
+        sw, sh = m["photo_w"], m["photo_h"]
+        if msg.photo is not None:
+            pic = msg.photo.convert("RGBA").resize((sw, sh), Image.LANCZOS)
+            layer.alpha_composite(pic, (0, 0))
+        else:
+            em = render_emoji(msg.sticker or "🙂", D)
+            if em is not None:
+                layer.alpha_composite(em, (0, 0))
         tw = int(ft.getlength(msg.time))
         # время у стикера стоит ПОД ним, иначе налезает на картинку
-        d.rounded_rectangle((D - tw - PX(18), D + PX(2), D, D + PX(24)),
+        d.rounded_rectangle((sw - tw - PX(18), sh + PX(2), sw, sh + PX(24)),
                             radius=PX(11), fill=(0, 0, 0, 105))
-        d.text((D - tw - PX(9), D + PX(5)), msg.time, font=ft, fill=(255, 255, 255, 235))
+        d.text((sw - tw - PX(9), sh + PX(5)), msg.time, font=ft, fill=(255, 255, 255, 235))
 
     canvas.alpha_composite(layer, (x, y))
 
