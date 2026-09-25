@@ -69,7 +69,7 @@ class ChatStates(StatesGroup):
 def blank_draft() -> dict:
     return {
         "contact_name": "", "contact_avatar": None,
-        "my_name": "", "my_avatar": None,
+        "my_name": "", "my_avatar": None, "my_female": None,
         "theme": "ios_teal", "start": "12:00", "step": 60,
         # группа: участники кроме тебя и кто сейчас говорит (-1 — ты)
         "kind": "duo",
@@ -542,7 +542,7 @@ async def got_member_name(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     draft = data["draft"]
     draft.setdefault("members", []).append(
-        {"name": message.text.strip()[:40], "avatar": None})
+        {"name": message.text.strip()[:40], "avatar": None, "female": None})
     await state.update_data(draft=draft)
     await state.set_state(ChatStates.member_avatar)
     await message.answer(f"аватарка для «{draft['members'][-1]['name']}»?",
@@ -692,13 +692,49 @@ async def pick_step(callback: CallbackQuery, state: FSMContext) -> None:
 
 # ---------- конструктор ----------
 
-# Телеграм согласует служебные строки по роду, а род участника мы не знаем —
-# поэтому не угадываем, а даём выбрать готовую формулировку.
-SERVICE_PHRASES = (
-    "присоединился к группе", "присоединилась к группе",
-    "покинул группу", "покинула группу",
-    "вернулся в группу", "вернулась в группу",
+# Служебные строки телеграма. Род он согласует, а мы его не знаем — поэтому
+# спрашиваем отдельным шагом, и для каждого действия держим обе формы.
+# (ключ, подпись на кнопке, мужская форма, женская форма, нужен ли второй человек)
+SERVICE_ACTIONS = (
+    ("join",   "вошёл в группу",     "{a} присоединился к группе", "{a} присоединилась к группе", False),
+    ("leave",  "вышел из группы",    "{a} покинул группу",         "{a} покинула группу",         False),
+    ("back",   "вернулся в группу",  "{a} вернулся в группу",      "{a} вернулась в группу",      False),
+    ("add",    "добавил другого",    "{a} добавил {b}",            "{a} добавила {b}",            True),
+    ("kick",   "удалил другого",     "{a} удалил {b}",             "{a} удалила {b}",             True),
+    ("pin",    "закрепил сообщение", "{a} закрепил сообщение",     "{a} закрепила сообщение",     False),
+    ("photo",  "сменил фото группы", "{a} изменил фото группы",    "{a} изменила фото группы",    False),
+    ("title",  "сменил название",    "{a} изменил название группы", "{a} изменила название группы", False),
 )
+
+
+def accusative(name: str, female: bool) -> str:
+    """Винительный падеж имени: «добавил Аню», а не «добавил Аня».
+
+    Для имён правила простые и работают почти всегда. Окончания -а/-я не
+    зависят от рода (Миша -> Мишу, Аня -> Аню), а вот согласная и мягкий знак
+    зависят: мужские склоняются (Денис -> Дениса), женские нет (Кармен).
+    Склоняется каждое слово, потому что «Валентина Петровна» -> «Валентину
+    Петровну». Если правило не подошло — слово остаётся как есть, это
+    заметно, но не страшно: рядом есть «свой текст».
+    """
+    out = []
+    for word in name.split():
+        low = word.lower()
+        if low.endswith("а"):
+            out.append(word[:-1] + "у")
+        elif low.endswith("я"):
+            out.append(word[:-1] + "ю")
+        elif low.endswith("й"):
+            out.append(word[:-1] + "я")
+        elif low.endswith("ь"):
+            out.append(word[:-1] + "я" if not female else word)
+        elif low and low[-1] in "оеиуыэю":
+            out.append(word)
+        elif low and low[-1].isalpha() and not female:
+            out.append(word + "а")
+        else:
+            out.append(word)
+    return " ".join(out)
 
 REPLY_LABELS = {
     "photo": "Фото", "voice": "Голосовое сообщение", "videonote": "Видеосообщение",
@@ -817,55 +853,138 @@ async def undo(callback: CallbackQuery, state: FSMContext) -> None:
     await show_builder(callback.message, draft, edit=True)
 
 
-@router.callback_query(ChatStates.builder, F.data == "chat:svc")
-async def service_who(callback: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    draft = data["draft"]
-    people = [(-1, draft["my_name"])]
-    people += [(i, m["name"]) for i, m in enumerate(draft.get("members", []))]
-    rows = [[InlineKeyboardButton(text=name[:18], callback_data=f"chat:svcw:{i}")
-             for i, name in people[k:k + 2]] for k in range(0, len(people), 2)]
+def _people(draft: dict) -> list:
+    return ([(-1, draft["my_name"])]
+            + [(i, m["name"]) for i, m in enumerate(draft.get("members", []))])
+
+
+def _people_kb(draft: dict, prefix: str, skip: int = -99) -> InlineKeyboardMarkup:
+    people = [(i, n) for i, n in _people(draft) if i != skip]
+    rows = [[InlineKeyboardButton(text=n[:18], callback_data=f"{prefix}:{i}")
+             for i, n in people[k:k + 2]] for k in range(0, len(people), 2)]
     rows.append([InlineKeyboardButton(text="← назад", callback_data="chat:back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def gender_of(draft: dict, idx: int):
+    """Род участника: спрашиваем один раз и запоминаем, дальше не переспрашиваем."""
+    if idx < 0:
+        return draft.get("my_female")
+    members = draft.get("members", [])
+    return members[idx].get("female") if idx < len(members) else None
+
+
+def set_gender(draft: dict, idx: int, female: bool) -> None:
+    if idx < 0:
+        draft["my_female"] = female
+    elif idx < len(draft.get("members", [])):
+        draft["members"][idx]["female"] = female
+
+
+def _action(key: str) -> tuple:
+    return next(a for a in SERVICE_ACTIONS if a[0] == key)
+
+
+@router.callback_query(ChatStates.builder, F.data == "chat:svc")
+async def service_action(callback: CallbackQuery, state: FSMContext) -> None:
+    rows = [[InlineKeyboardButton(text=label, callback_data=f"chat:svca:{key}")]
+            for key, label, *_ in SERVICE_ACTIONS]
+    rows.append([InlineKeyboardButton(text="свой текст", callback_data="chat:svca:own"),
+                 InlineKeyboardButton(text="← назад", callback_data="chat:back")])
     await callback.answer()
-    await callback.message.edit_text("кто вошёл или вышел?",
+    await callback.message.edit_text("что произошло в группе?",
                                      reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
-@router.callback_query(ChatStates.builder, F.data.startswith("chat:svcw:"))
-async def service_phrase(callback: CallbackQuery, state: FSMContext) -> None:
-    idx = int(callback.data.split(":")[2])
-    await state.update_data(svc_who=idx)
-    rows = [[InlineKeyboardButton(text=ph, callback_data=f"chat:svcp:{i}")]
-            for i, ph in enumerate(SERVICE_PHRASES)]
-    rows.append([InlineKeyboardButton(text="свой текст", callback_data="chat:svcp:own"),
-                 InlineKeyboardButton(text="← назад", callback_data="chat:back")])
-    await callback.answer()
-    await callback.message.edit_text(
-        "что произошло? выбирай с правильным родом — телеграм пишет именно так",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-
-
-def _add_service(draft: dict, text: str) -> None:
-    """Служебная строка ничья: у неё нет автора, хвостика и времени."""
-    draft["items"].append({"kind": "service", "out": False, "text": text[:80]})
-
-
-@router.callback_query(ChatStates.builder, F.data.startswith("chat:svcp:"))
-async def service_done(callback: CallbackQuery, state: FSMContext) -> None:
-    data = await state.get_data()
-    draft = data["draft"]
-    what = callback.data.split("chat:svcp:", 1)[1]
-    if what == "own":
+@router.callback_query(ChatStates.builder, F.data.startswith("chat:svca:"))
+async def service_actor(callback: CallbackQuery, state: FSMContext) -> None:
+    key = callback.data.split("chat:svca:", 1)[1]
+    if key == "own":
         await state.set_state(ChatStates.wait_service)
         await callback.answer()
         await callback.message.edit_text(
             "напиши строчку целиком, например «Аню добавил в группу Миша»")
         return
-    who = sender_name(draft, data.get("svc_who", -1))
-    _add_service(draft, f"{who} {SERVICE_PHRASES[int(what)]}")
+    data = await state.get_data()
+    await state.update_data(svc_action=key)
+    await callback.answer()
+    await callback.message.edit_text(
+        "кто это сделал?", reply_markup=_people_kb(data["draft"], "chat:svcw"))
+
+
+@router.callback_query(ChatStates.builder, F.data.startswith("chat:svcw:"))
+async def service_who(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    idx = int(callback.data.split(":")[2])
+    await state.update_data(svc_who=idx)
+    await callback.answer()
+    if _action(data["svc_action"])[4]:          # действию нужен второй человек
+        await callback.message.edit_text(
+            "а кого?", reply_markup=_people_kb(data["draft"], "chat:svct", skip=idx))
+        return
+    await _next_gender_or_build(callback, state)
+
+
+async def _next_gender_or_build(callback: CallbackQuery, state: FSMContext) -> None:
+    """Спрашивает род только у тех, чей ещё не знаем, и собирает строку."""
+    data = await state.get_data()
+    draft = data["draft"]
+    needed = [data.get("svc_who", -1)]
+    if _action(data["svc_action"])[4]:
+        needed.append(data.get("svc_target", -1))
+    unknown = [i for i in needed if gender_of(draft, i) is None]
+    if not unknown:
+        await _build_service(callback, state)
+        return
+    idx = unknown[0]
+    await state.update_data(svc_asking=idx)
+    who = sender_name(draft, idx)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=f"{who} — он", callback_data="chat:svcg:m"),
+        InlineKeyboardButton(text=f"{who} — она", callback_data="chat:svcg:f"),
+    ], [InlineKeyboardButton(text="← назад", callback_data="chat:back")]])
+    await callback.message.edit_text(
+        f"{who} — он или она? телеграм согласует строчку по роду, "
+        "спрошу только один раз", reply_markup=kb)
+
+
+@router.callback_query(ChatStates.builder, F.data.startswith("chat:svct:"))
+async def service_target(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.update_data(svc_target=int(callback.data.split(":")[2]))
+    await callback.answer()
+    await _next_gender_or_build(callback, state)
+
+
+def _add_service(draft: dict, text: str) -> None:
+    """Служебная строка ничья: у неё нет автора, хвостика и времени."""
+    draft["items"].append({"kind": "service", "out": False, "text": text[:90]})
+
+
+async def _build_service(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    draft = data["draft"]
+    _, _, tpl_m, tpl_f, needs_target = _action(data["svc_action"])
+    who = data.get("svc_who", -1)
+    target = data.get("svc_target", -1)
+    tpl = tpl_f if gender_of(draft, who) else tpl_m
+    line = tpl.format(
+        a=sender_name(draft, who),
+        b=accusative(sender_name(draft, target), bool(gender_of(draft, target)))
+        if needs_target else "")
+    _add_service(draft, line)
+    await state.update_data(draft=draft)
+    await show_builder(callback.message, draft, edit=True)
+
+
+@router.callback_query(ChatStates.builder, F.data.startswith("chat:svcg:"))
+async def service_gender(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    draft = data["draft"]
+    set_gender(draft, data.get("svc_asking", -1), callback.data.endswith("f"))
     await state.update_data(draft=draft)
     await callback.answer()
-    await show_builder(callback.message, draft, edit=True)
+    await _next_gender_or_build(callback, state)
 
 
 @router.message(ChatStates.wait_service, F.text)
