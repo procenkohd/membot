@@ -45,6 +45,7 @@ import chatflow
 import stickers
 import ui
 import phrase_queue
+import render_store
 from sqlite_storage import SQLiteStorage
 from storage import data_path
 
@@ -180,6 +181,28 @@ def random_render_entry(source_file_id: str, rendered_file_id: str, phrase: str)
         "rendered_file_id": rendered_file_id,
         "spec": {"kind": "random", "phrase": phrase},
     }
+
+
+async def persist_render(state: FSMContext, render_id: str, entry: dict,
+                         chat_id: int, user_id: int) -> None:
+    """Пишет данные кнопок отдельно от FSM и оставляет совместимую копию в нём."""
+    render_store.save(render_id, chat_id, user_id, entry)
+    data = await state.get_data()
+    await state.update_data(renders=remember_render(data, render_id, entry))
+
+
+async def find_render(callback: CallbackQuery, state: FSMContext, render_id: str) -> dict | None:
+    """Ищет новый durable-рендер, затем переносит запись старого формата из FSM."""
+    chat_id = callback.message.chat.id
+    user_id = callback.from_user.id
+    entry = render_store.get(render_id, chat_id, user_id)
+    if entry:
+        return entry
+    data = await state.get_data()
+    entry = (data.get("renders") or {}).get(render_id)
+    if entry:
+        render_store.save(render_id, chat_id, user_id, entry)
+    return entry
 
 
 async def reset_state(state: FSMContext) -> None:
@@ -576,16 +599,16 @@ async def custom_meme_got_text(message: Message, state: FSMContext, bot: Bot) ->
     sent = await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
         caption=await ui.bot_caption(bot),
-        reply_markup=submit_this_kb(render_id),
     )
     await message.answer("можно кидать следующее фото", reply_markup=main_kb)
-    renders = remember_render(data, render_id, {
+    entry = {
         "rendered_file_id": sent.photo[-1].file_id,
         # текст держим при рендере, чтобы «другая картинка» могла его повторить
         "spec": {"kind": "custom", "text": text, "fmt": fmt,
                  "font_id": data.get("custom_font_id")},
-    })
-    await state.update_data(renders=renders)
+    }
+    await persist_render(state, render_id, entry, message.chat.id, message.from_user.id)
+    await sent.edit_reply_markup(reply_markup=submit_this_kb(render_id))
 
     await offer_custom_text_as_phrase(bot, text, message.chat.id)
 
@@ -610,8 +633,8 @@ def render_by_spec(image_bytes: bytes, spec: dict):
 @dp.callback_query(F.data.startswith("repic:"))
 async def repic_ask(callback: CallbackQuery, state: FSMContext) -> None:
     render_id = callback.data.split(":", 1)[1]
-    data = await state.get_data()
-    spec = ((data.get("renders") or {}).get(render_id) or {}).get("spec")
+    entry = await find_render(callback, state, render_id)
+    spec = (entry or {}).get("spec")
     if not spec:
         await callback.answer("надпись этого мема я уже не помню, сделай новый",
                               show_alert=True)
@@ -647,16 +670,16 @@ async def repic_photo(message: Message, state: FSMContext, bot: Bot) -> None:
     kb = try_again_kb(render_id) if spec.get("kind") == "random" else submit_this_kb(render_id)
     sent = await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
-        caption=await ui.bot_caption(bot), reply_markup=kb)
+        caption=await ui.bot_caption(bot))
     await message.answer("можно менять картинку дальше или кидать новое фото",
                          reply_markup=main_kb)
-    data = await state.get_data()
-    renders = remember_render(data, render_id, {
+    entry = {
         "source_file_id": photo.file_id,
         "rendered_file_id": sent.photo[-1].file_id,
         "spec": spec,
-    })
-    await state.update_data(renders=renders)
+    }
+    await persist_render(state, render_id, entry, message.chat.id, message.from_user.id)
+    await sent.edit_reply_markup(reply_markup=kb)
 
 
 # ---------- обычный режим: просто прислали фото -> случайный мем ----------
@@ -682,13 +705,10 @@ async def handle_photo(message: Message, state: FSMContext, bot: Bot) -> None:
     sent = await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
         caption=await ui.bot_caption(bot),
-        reply_markup=try_again_kb(render_id),
     )
-    data = await state.get_data()
-    renders = remember_render(
-        data, render_id, random_render_entry(photo.file_id, sent.photo[-1].file_id, phrase)
-    )
-    await state.update_data(renders=renders)
+    entry = random_render_entry(photo.file_id, sent.photo[-1].file_id, phrase)
+    await persist_render(state, render_id, entry, message.chat.id, message.from_user.id)
+    await sent.edit_reply_markup(reply_markup=try_again_kb(render_id))
 
 
 @dp.message(StateFilter(None), F.document & F.document.mime_type.startswith("image/"))
@@ -713,20 +733,16 @@ async def handle_document_photo(message: Message, state: FSMContext, bot: Bot) -
     sent = await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
         caption=await ui.bot_caption(bot),
-        reply_markup=try_again_kb(render_id),
     )
-    data = await state.get_data()
-    renders = remember_render(
-        data, render_id, random_render_entry(doc.file_id, sent.photo[-1].file_id, phrase)
-    )
-    await state.update_data(renders=renders)
+    entry = random_render_entry(doc.file_id, sent.photo[-1].file_id, phrase)
+    await persist_render(state, render_id, entry, message.chat.id, message.from_user.id)
+    await sent.edit_reply_markup(reply_markup=try_again_kb(render_id))
 
 
 @dp.callback_query(F.data.startswith("try_again:"))
 async def try_again(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     render_id = callback.data.split(":", 1)[1]
-    data = await state.get_data()
-    entry = data.get("renders", {}).get(render_id)
+    entry = await find_render(callback, state, render_id)
     if not entry:
         await callback.answer("не нашёл предыдущее фото, кинь новое", show_alert=True)
         return
@@ -752,12 +768,11 @@ async def try_again(callback: CallbackQuery, state: FSMContext, bot: Bot) -> Non
     sent = await callback.message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
         caption=await ui.bot_caption(bot),
-        reply_markup=try_again_kb(new_id),
     )
-    renders = remember_render(
-        data, new_id, random_render_entry(file_id, sent.photo[-1].file_id, phrase)
-    )
-    await state.update_data(renders=renders)
+    entry = random_render_entry(file_id, sent.photo[-1].file_id, phrase)
+    await persist_render(
+        state, new_id, entry, callback.message.chat.id, callback.from_user.id)
+    await sent.edit_reply_markup(reply_markup=try_again_kb(new_id))
 
 
 @dp.callback_query(F.data.startswith("submit_last:"))
@@ -767,8 +782,7 @@ async def submit_last(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer(error, show_alert=True)
         return
     render_id = callback.data.split(":", 1)[1]
-    data = await state.get_data()
-    entry = data.get("renders", {}).get(render_id)
+    entry = await find_render(callback, state, render_id)
     if not entry:
         await callback.answer("не нашёл мем, кинь фото заново", show_alert=True)
         return
@@ -796,8 +810,7 @@ async def submit_custom(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer(error, show_alert=True)
         return
     render_id = callback.data.split(":", 1)[1]
-    data = await state.get_data()
-    entry = data.get("renders", {}).get(render_id)
+    entry = await find_render(callback, state, render_id)
     if not entry:
         await callback.answer("не нашёл мем, загрузи заново", show_alert=True)
         return

@@ -15,6 +15,7 @@ os.environ["DATA_DIR"] = _IMPORT_DATA.name
 
 import bot
 from aiogram.fsm.storage.base import StorageKey
+import render_store
 import stats
 import stickers
 import submission_queue
@@ -30,6 +31,15 @@ class RenderHistoryTests(unittest.TestCase):
     def test_text_limits_are_reported_before_queueing(self):
         self.assertIsNone(bot.validate_text("нормально", 20))
         self.assertIn("максимум 5", bot.validate_text("слишком длинно", 5))
+
+    def test_render_buttons_do_not_depend_on_fsm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "renders.sqlite3"
+            entry = bot.random_render_entry("source", "rendered", "фраза")
+            with patch.object(render_store, "DB_FILE", path):
+                render_store.save("abc", chat_id=10, user_id=20, entry=entry)
+                self.assertEqual(render_store.get("abc", 10, 20), entry)
+                self.assertIsNone(render_store.get("abc", 10, 99))
 
 
 class StickerTests(unittest.TestCase):

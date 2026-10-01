@@ -15,3 +15,6 @@ emoji_cache/
 fsm.sqlite3
 fsm.sqlite3-shm
 fsm.sqlite3-wal
+renders.sqlite3
+renders.sqlite3-shm
+renders.sqlite3-wal
