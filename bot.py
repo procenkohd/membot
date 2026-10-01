@@ -27,7 +27,6 @@ from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -46,23 +45,32 @@ import chatflow
 import stickers
 import ui
 import phrase_queue
+from sqlite_storage import SQLiteStorage
+from storage import data_path
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0") or "0")
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip()  # например @my_channel или -100...
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip()  # обратная совместимость
+SUBSCRIPTION_CHANNEL_ID = os.environ.get("SUBSCRIPTION_CHANNEL_ID", CHANNEL_ID).strip()
+POST_CHANNEL_ID = os.environ.get("POST_CHANNEL_ID", CHANNEL_ID).strip()
+CHANNEL_URL = os.environ.get("CHANNEL_URL", "").strip()
 
-dp = Dispatcher(storage=MemoryStorage())
+dp = Dispatcher(storage=SQLiteStorage(data_path("fsm.sqlite3")))
+
+MAX_MEME_TEXT = 500
+MAX_PHRASE_TEXT = 500
+MAX_SUBMISSION_TEXT = 900
 
 
 async def is_subscribed(bot: Bot, user_id: int) -> bool:
     """Проверяет подписку на канал. Если канал ещё не настроен — не блокируем."""
-    if not CHANNEL_ID:
+    if not SUBSCRIPTION_CHANNEL_ID:
         return True
     try:
-        member = await bot.get_chat_member(CHANNEL_ID, user_id)
+        member = await bot.get_chat_member(SUBSCRIPTION_CHANNEL_ID, user_id)
         return member.status in ("member", "administrator", "creator")
     except Exception:
         logger.exception("Failed to check channel subscription")
@@ -70,28 +78,16 @@ async def is_subscribed(bot: Bot, user_id: int) -> bool:
 
 
 def subscribe_kb() -> InlineKeyboardMarkup:
-    channel_url = f"https://t.me/{CHANNEL_ID.lstrip('@')}" if CHANNEL_ID else "https://t.me"
+    channel_url = CHANNEL_URL
+    if not channel_url and SUBSCRIPTION_CHANNEL_ID.startswith("@"):
+        channel_url = f"https://t.me/{SUBSCRIPTION_CHANNEL_ID.lstrip('@')}"
+    rows = []
+    if channel_url:
+        rows.append([InlineKeyboardButton(text="➡️ Подписаться на канал", url=channel_url)])
+    rows.append([InlineKeyboardButton(text="✅ Проверить", callback_data="check_sub")])
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="➡️ Подписаться на канал", url=channel_url)],
-            [InlineKeyboardButton(text="✅ Проверить", callback_data="check_sub")],
-        ]
+        inline_keyboard=rows
     )
-
-
-class StatsMiddleware(BaseMiddleware):
-    """Отмечает чат как активный в текущем месяце на любое сообщение."""
-
-    async def __call__(self, handler, event: Message, data):
-        if event.chat:
-            try:
-                stats.track(event.chat.id)
-            except Exception:
-                logger.exception("Failed to track stats")
-        return await handler(event, data)
-
-
-dp.message.middleware(StatsMiddleware())
 
 
 class SubscriptionGateMiddleware(BaseMiddleware):
@@ -116,6 +112,12 @@ class SubscriptionGateMiddleware(BaseMiddleware):
             else:
                 await event.answer(text, reply_markup=subscribe_kb())
             return  # дальше хендлер не пускаем
+
+        if user:
+            try:
+                stats.track(user.id)
+            except Exception:
+                logger.exception("Failed to track stats")
 
         return await handler(event, data)
 
@@ -148,9 +150,6 @@ cancel_kb = ui.cancel_kb
 BTN_SUBMIT_THIS = "📮 В предложку"
 BTN_SUBMITTED = "✅ Отправлено"
 
-MEME_CAPTION = "мем-машина без вкуса и совести: @randomem_bot"
-
-
 RENDER_HISTORY_LIMIT = 20  # сколько последних мемов на чат помним для кнопок под старыми сообщениями
 
 
@@ -172,6 +171,15 @@ def remember_render(data: dict, render_id: str, entry: dict) -> dict:
         for old_id in list(renders.keys())[:-RENDER_HISTORY_LIMIT]:
             del renders[old_id]
     return renders
+
+
+def random_render_entry(source_file_id: str, rendered_file_id: str, phrase: str) -> dict:
+    """Единая форма записи: все кнопки старого мема получают и фото, и фразу."""
+    return {
+        "source_file_id": source_file_id,
+        "rendered_file_id": rendered_file_id,
+        "spec": {"kind": "random", "phrase": phrase},
+    }
 
 
 async def reset_state(state: FSMContext) -> None:
@@ -298,6 +306,23 @@ def _phrase_key(text: str) -> str:
     return " ".join(re.sub(r"[\W_]+", " ", s).split())
 
 
+def validate_text(text: str, limit: int, label: str = "текст") -> str | None:
+    """Возвращает понятную ошибку вместо сиротской заявки или сломанного рендера."""
+    if not text.strip():
+        return f"{label} пустой"
+    if len(text) > limit:
+        return f"{label} слишком длинный: максимум {limit} символов, сейчас {len(text)}"
+    return None
+
+
+def moderation_error(require_channel: bool = False) -> str | None:
+    if not ADMIN_ID:
+        return "предложка пока не настроена: владелец бота не указал ADMIN_ID"
+    if require_channel and not POST_CHANNEL_ID:
+        return "канал для публикации пока не настроен"
+    return None
+
+
 async def offer_custom_text_as_phrase(bot: Bot, text: str, chat_id: int) -> None:
     """Текст, который человек придумал для своего мема, отправляем админу на
     модерацию как кандидата в общую базу — база так пополняется живыми фразами
@@ -358,7 +383,7 @@ def build_help_text() -> str:
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
-    await state.clear()
+    await reset_state(state)
     await message.answer(build_help_text(), reply_markup=main_kb)
 
 
@@ -389,6 +414,10 @@ async def cancel_any(message: Message, state: FSMContext) -> None:
 
 @dp.message(F.text == BTN_ADD_PHRASE)
 async def add_phrase_start(message: Message, state: FSMContext) -> None:
+    error = moderation_error()
+    if error:
+        await message.answer(error, reply_markup=main_kb)
+        return
     await state.set_state(MemeStates.waiting_phrase)
     await message.answer(
         "пришли текст фразы, которую добавить в базу.\n"
@@ -402,12 +431,20 @@ async def add_phrase_start(message: Message, state: FSMContext) -> None:
 
 @dp.message(Command("add"))
 async def cmd_add(message: Message, bot: Bot) -> None:
+    error = moderation_error()
+    if error:
+        await message.answer(error)
+        return
     text = message.text.partition(" ")[2].strip()
     if not text:
         await message.answer(
             "после /add напиши саму фразу. можно с | для верх/низ, например:\n"
             "/add я узнал|что бот теперь умнее меня"
         )
+        return
+    error = validate_text(text, MAX_PHRASE_TEXT, "фраза")
+    if error:
+        await message.answer(error)
         return
     sub_id = phrase_queue.add_submission(text, message.chat.id)
     await notify_admin_phrase_submission(bot, sub_id, text)
@@ -417,8 +454,9 @@ async def cmd_add(message: Message, bot: Bot) -> None:
 @dp.message(MemeStates.waiting_phrase, F.text)
 async def add_phrase_finish(message: Message, state: FSMContext, bot: Bot) -> None:
     text = message.text.strip()
-    if not text:
-        await message.answer("это не похоже на текст фразы, попробуй ещё раз")
+    error = validate_text(text, MAX_PHRASE_TEXT, "фраза")
+    if error:
+        await message.answer(error)
         return
     sub_id = phrase_queue.add_submission(text, message.chat.id)
     await notify_admin_phrase_submission(bot, sub_id, text)
@@ -504,8 +542,13 @@ async def custom_meme_got_text(message: Message, state: FSMContext, bot: Bot) ->
         await message.answer("что-то потерялось, давай заново", reply_markup=main_kb)
         return
 
+    text = message.text.strip()
+    error = validate_text(text, MAX_MEME_TEXT)
+    if error:
+        await message.answer(error)
+        return
     fmt = data.get("custom_format", "meme")
-    top, bottom = parse_phrase(message.text.strip())
+    top, bottom = parse_phrase(text)
 
     file = await bot.get_file(file_id)
     file_bytes = await bot.download_file(file.file_path)
@@ -532,19 +575,19 @@ async def custom_meme_got_text(message: Message, state: FSMContext, bot: Bot) ->
     render_id = new_render_id()
     sent = await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
-        caption=MEME_CAPTION,
+        caption=await ui.bot_caption(bot),
         reply_markup=submit_this_kb(render_id),
     )
     await message.answer("можно кидать следующее фото", reply_markup=main_kb)
     renders = remember_render(data, render_id, {
         "rendered_file_id": sent.photo[-1].file_id,
         # текст держим при рендере, чтобы «другая картинка» могла его повторить
-        "spec": {"kind": "custom", "text": message.text.strip(), "fmt": fmt,
+        "spec": {"kind": "custom", "text": text, "fmt": fmt,
                  "font_id": data.get("custom_font_id")},
     })
     await state.update_data(renders=renders)
 
-    await offer_custom_text_as_phrase(bot, message.text.strip(), message.chat.id)
+    await offer_custom_text_as_phrase(bot, text, message.chat.id)
 
 
 # ---------- та же надпись на другой картинке ----------
@@ -604,7 +647,7 @@ async def repic_photo(message: Message, state: FSMContext, bot: Bot) -> None:
     kb = try_again_kb(render_id) if spec.get("kind") == "random" else submit_this_kb(render_id)
     sent = await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
-        caption=MEME_CAPTION, reply_markup=kb)
+        caption=await ui.bot_caption(bot), reply_markup=kb)
     await message.answer("можно менять картинку дальше или кидать новое фото",
                          reply_markup=main_kb)
     data = await state.get_data()
@@ -638,14 +681,12 @@ async def handle_photo(message: Message, state: FSMContext, bot: Bot) -> None:
     render_id = new_render_id()
     sent = await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
-        caption=MEME_CAPTION,
+        caption=await ui.bot_caption(bot),
         reply_markup=try_again_kb(render_id),
     )
     data = await state.get_data()
     renders = remember_render(
-        data, render_id, {"source_file_id": photo.file_id,
-                          "rendered_file_id": sent.photo[-1].file_id,
-                          "spec": {"kind": "random", "phrase": phrase}}
+        data, render_id, random_render_entry(photo.file_id, sent.photo[-1].file_id, phrase)
     )
     await state.update_data(renders=renders)
 
@@ -671,12 +712,12 @@ async def handle_document_photo(message: Message, state: FSMContext, bot: Bot) -
     render_id = new_render_id()
     sent = await message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
-        caption=MEME_CAPTION,
+        caption=await ui.bot_caption(bot),
         reply_markup=try_again_kb(render_id),
     )
     data = await state.get_data()
     renders = remember_render(
-        data, render_id, {"source_file_id": doc.file_id, "rendered_file_id": sent.photo[-1].file_id}
+        data, render_id, random_render_entry(doc.file_id, sent.photo[-1].file_id, phrase)
     )
     await state.update_data(renders=renders)
 
@@ -710,17 +751,21 @@ async def try_again(callback: CallbackQuery, state: FSMContext, bot: Bot) -> Non
     new_id = new_render_id()
     sent = await callback.message.answer_photo(
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
-        caption=MEME_CAPTION,
+        caption=await ui.bot_caption(bot),
         reply_markup=try_again_kb(new_id),
     )
     renders = remember_render(
-        data, new_id, {"source_file_id": file_id, "rendered_file_id": sent.photo[-1].file_id}
+        data, new_id, random_render_entry(file_id, sent.photo[-1].file_id, phrase)
     )
     await state.update_data(renders=renders)
 
 
 @dp.callback_query(F.data.startswith("submit_last:"))
 async def submit_last(callback: CallbackQuery, state: FSMContext) -> None:
+    error = moderation_error(require_channel=True)
+    if error:
+        await callback.answer(error, show_alert=True)
+        return
     render_id = callback.data.split(":", 1)[1]
     data = await state.get_data()
     entry = data.get("renders", {}).get(render_id)
@@ -730,12 +775,12 @@ async def submit_last(callback: CallbackQuery, state: FSMContext) -> None:
     rendered_file_id = entry["rendered_file_id"]
 
     await callback.answer()
-    try:
-        await callback.message.edit_reply_markup(reply_markup=try_again_kb(render_id, submitted=True))
-    except Exception:
-        pass
-
-    await state.update_data(submit_photo_file_id=rendered_file_id)
+    await state.update_data(
+        submit_photo_file_id=rendered_file_id,
+        submit_render_id=render_id,
+        submit_kind="random",
+        submit_message_id=callback.message.message_id,
+    )
     await state.set_state(MemeStates.waiting_submit_text)
     await callback.message.answer(
         "теперь пришли текст для подписи к посту,\n"
@@ -746,6 +791,10 @@ async def submit_last(callback: CallbackQuery, state: FSMContext) -> None:
 
 @dp.callback_query(F.data.startswith("submit_custom:"))
 async def submit_custom(callback: CallbackQuery, state: FSMContext) -> None:
+    error = moderation_error(require_channel=True)
+    if error:
+        await callback.answer(error, show_alert=True)
+        return
     render_id = callback.data.split(":", 1)[1]
     data = await state.get_data()
     entry = data.get("renders", {}).get(render_id)
@@ -755,12 +804,12 @@ async def submit_custom(callback: CallbackQuery, state: FSMContext) -> None:
     rendered_file_id = entry["rendered_file_id"]
 
     await callback.answer()
-    try:
-        await callback.message.edit_reply_markup(reply_markup=submit_this_kb(render_id, submitted=True))
-    except Exception:
-        pass
-
-    await state.update_data(submit_photo_file_id=rendered_file_id)
+    await state.update_data(
+        submit_photo_file_id=rendered_file_id,
+        submit_render_id=render_id,
+        submit_kind="custom",
+        submit_message_id=callback.message.message_id,
+    )
     await state.set_state(MemeStates.waiting_submit_text)
     await callback.message.answer(
         "теперь пришли текст для подписи к посту,\n"
@@ -779,6 +828,10 @@ async def noop_cb(callback: CallbackQuery) -> None:
 
 @dp.message(F.text == BTN_SUBMIT)
 async def submit_start(message: Message, state: FSMContext) -> None:
+    error = moderation_error(require_channel=True)
+    if error:
+        await message.answer(error, reply_markup=main_kb)
+        return
     await state.set_state(MemeStates.waiting_submit_photo)
     await message.answer(
         "пришли фото, которое хочешь предложить в канал",
@@ -789,6 +842,10 @@ async def submit_start(message: Message, state: FSMContext) -> None:
 @dp.callback_query(F.data == "check_sub")
 async def check_sub(callback: CallbackQuery, bot: Bot) -> None:
     if await is_subscribed(bot, callback.from_user.id):
+        try:
+            stats.track(callback.from_user.id)
+        except Exception:
+            logger.exception("Failed to track stats")
         await callback.answer("подписка подтверждена!")
         await callback.message.answer(
             "отлично, теперь можно пользоваться ботом:",
@@ -804,7 +861,7 @@ async def submit_got_photo(message: Message, state: FSMContext) -> None:
     await state.update_data(submit_photo_file_id=photo.file_id)
     await state.set_state(MemeStates.waiting_submit_text)
     await message.answer(
-        "теперь пришли текст для мема (можно с | для верх/низ),\n"
+        "теперь пришли подпись к посту,\n"
         "или отправь просто «-», если текст не нужен — фото уйдёт как есть",
         reply_markup=cancel_kb,
     )
@@ -827,8 +884,25 @@ async def submit_got_text(message: Message, state: FSMContext, bot: Bot) -> None
     text = message.text.strip()
     if text == "-":
         text = ""
+    if len(text) > MAX_SUBMISSION_TEXT:
+        await message.answer(
+            f"подпись слишком длинная: максимум {MAX_SUBMISSION_TEXT} символов, "
+            f"сейчас {len(text)}. сократи и пришли ещё раз"
+        )
+        return
 
     sub_id = submission_queue.add_submission(file_id, text, message.chat.id)
+    render_id = data.get("submit_render_id")
+    source_message_id = data.get("submit_message_id")
+    if render_id and source_message_id:
+        kb = (try_again_kb(render_id, submitted=True)
+              if data.get("submit_kind") == "random"
+              else submit_this_kb(render_id, submitted=True))
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=message.chat.id, message_id=source_message_id, reply_markup=kb)
+        except Exception:
+            logger.exception("Failed to mark submitted meme button")
     await reset_state(state)
     await message.answer(
         "отправил на модерацию, спасибо! если одобрят — попадёт в канал",
@@ -845,21 +919,23 @@ async def approve_submission(callback: CallbackQuery, bot: Bot) -> None:
         return
 
     sub_id = callback.data.split(":", 1)[1]
-    sub = submission_queue.get_submission(sub_id)
-    if not sub or sub.get("status") != "pending":
+    sub = submission_queue.claim_pending(sub_id)
+    if not sub:
         await callback.answer("уже обработано", show_alert=True)
         return
 
-    if not CHANNEL_ID:
-        await callback.answer("канал не настроен (переменная CHANNEL_ID)", show_alert=True)
+    if not POST_CHANNEL_ID:
+        submission_queue.set_status(sub_id, "pending")
+        await callback.answer("канал не настроен (POST_CHANNEL_ID/CHANNEL_ID)", show_alert=True)
         return
 
     try:
         if sub["text"]:
-            await bot.send_photo(CHANNEL_ID, sub["photo_file_id"], caption=sub["text"])
+            await bot.send_photo(POST_CHANNEL_ID, sub["photo_file_id"], caption=sub["text"])
         else:
-            await bot.send_photo(CHANNEL_ID, sub["photo_file_id"])
+            await bot.send_photo(POST_CHANNEL_ID, sub["photo_file_id"])
     except Exception:
+        submission_queue.set_status(sub_id, "pending")
         logger.exception("Failed to post submission to channel")
         await callback.answer("не получилось запостить в канал", show_alert=True)
         return
@@ -916,18 +992,26 @@ async def edit_submission_start(callback: CallbackQuery, state: FSMContext) -> N
 async def edit_submission_finish(message: Message, state: FSMContext, bot: Bot) -> None:
     data = await state.get_data()
     sub_id = data.get("editing_sub_id")
-    await reset_state(state)
     if not sub_id:
+        await reset_state(state)
         return
 
     sub = submission_queue.get_submission(sub_id)
     if not sub or sub.get("status") != "pending":
+        await reset_state(state)
         await message.answer("заявка уже обработана")
         return
 
     new_text = message.text.strip()
     if new_text == "-":
         new_text = ""
+    if len(new_text) > MAX_SUBMISSION_TEXT:
+        await message.answer(
+            f"подпись слишком длинная: максимум {MAX_SUBMISSION_TEXT} символов, "
+            f"сейчас {len(new_text)}. сократи и пришли ещё раз"
+        )
+        return
+    await reset_state(state)
     submission_queue.set_text(sub_id, new_text)
     await message.answer(f"текст заявки #{sub_id} обновлён")
 

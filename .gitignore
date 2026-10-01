@@ -12,3 +12,6 @@ data/
 backups/
 ref/
 emoji_cache/
+fsm.sqlite3
+fsm.sqlite3-shm
+fsm.sqlite3-wal

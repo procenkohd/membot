@@ -121,11 +121,14 @@ def short_name(title: str, bot_username: str) -> str:
     """Имя для ссылки: транслит названия плюс случайный хвост от коллизий."""
     base = "".join(_TRANSLIT.get(c, c) for c in title.lower())
     base = re.sub(r"[^a-z0-9]+", "_", base).strip("_")
-    base = re.sub(r"_{2,}", "_", base)[:24].strip("_")
+    base = re.sub(r"_{2,}", "_", base)
     if not base or not base[0].isalpha():
         base = "memes" + ("_" + base if base else "")
     tail = "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(5))
-    return f"{base}_{tail}_by_{bot_username}"
+    suffix = f"_{tail}_by_{bot_username}"
+    # Bot API ограничивает short name 64 символами, username может занимать 32.
+    base = base[:max(1, 64 - len(suffix))].rstrip("_") or "m"
+    return f"{base}{suffix}"
 
 
 # ---------- картинка ----------
@@ -142,12 +145,24 @@ async def to_sticker_bytes(bot: Bot, file_id: str) -> Optional[bytes]:
     w, h = im.size
     k = STICKER_SIDE / max(w, h)
     im = im.resize((max(1, round(w * k)), max(1, round(h * k))), Image.LANCZOS)
-    for quality in (92, 80, 68, 55, 40):
-        out = BytesIO()
-        im.save(out, format="WEBP", quality=quality, method=4)
-        if out.tell() <= STICKER_MAX_BYTES:
-            return out.getvalue()
-    return out.getvalue()
+    def encode(image: Image.Image) -> Optional[bytes]:
+        for quality in (92, 80, 68, 55, 40, 28, 18):
+            out = BytesIO()
+            image.save(out, format="WEBP", quality=quality, method=6)
+            if out.tell() <= STICKER_MAX_BYTES:
+                return out.getvalue()
+        return None
+
+    result = encode(im)
+    if result is not None:
+        return result
+
+    # У сложной прозрачности альфа-канал кодируется почти без потерь и иногда
+    # один занимает больше лимита. Упрощаем только альфу, размер 512 сохраняем.
+    alpha = im.getchannel("A").point(lambda value: 255 if value >= 128 else 0)
+    simplified = im.copy()
+    simplified.putalpha(alpha)
+    return encode(simplified)
 
 
 # ---------- работа с телеграмом ----------
@@ -225,12 +240,12 @@ def choose_pack_kb(packs: list) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text=f"{p['title']} · {p.get('count', 0)}/{PACK_LIMIT}",
                                   callback_data=f"stk:to:{i}")]
             for i, p in enumerate(packs[:8])]
-    rows.append([InlineKeyboardButton(text="➕ новый пак", callback_data="stk:new")])
+    rows.append([InlineKeyboardButton(text="➕ новый пак", callback_data="stk:new:current")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def packs_kb(packs: list) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text="➕ создать пак", callback_data="stk:new")]]
+    rows = [[InlineKeyboardButton(text="➕ создать пак", callback_data="stk:new:empty")]]
     if packs:
         rows.insert(0, [InlineKeyboardButton(text="📥 накидать картинок",
                                              callback_data="stk:dump")])
@@ -319,12 +334,19 @@ async def pick_pack(callback: CallbackQuery, state: FSMContext, bot: Bot) -> Non
         return
     await callback.answer("кладу")
     err = await add_to_pack(bot, callback.from_user.id, packs[idx]["name"], file_id)
+    if not err:
+        await state.update_data(stk_file=None)
     await _report(callback.message, callback.from_user.id, packs[idx], err, bot, state)
 
 
-@router.callback_query(F.data == "stk:new")
+@router.callback_query(F.data.startswith("stk:new"))
 async def new_pack(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(StickerStates.waiting_title)
+    await state.update_data(stk_pending_title=None)
+    if callback.data != "stk:new:current":
+        # Кнопка из списка паков не должна подхватывать старую картинку. В меню
+        # выбора пака, наоборот, текущий мем нужен как первый стикер нового пака.
+        await state.update_data(stk_file=None)
     await callback.answer()
     await callback.message.answer("как назвать новый пак?", reply_markup=ui.cancel_kb)
 
@@ -332,6 +354,9 @@ async def new_pack(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(StickerStates.waiting_title, F.text)
 async def got_title(message: Message, state: FSMContext, bot: Bot) -> None:
     title = message.text.strip()[:64]
+    if not title:
+        await message.answer("название не может быть пустым, попробуй ещё раз")
+        return
     data = await state.get_data()
     file_id = data.get("stk_file")
     await state.set_state(None)
@@ -346,8 +371,10 @@ async def got_title(message: Message, state: FSMContext, bot: Bot) -> None:
         return
     name, err = await create_pack(bot, message.from_user.id, title, file_id)
     if err:
+        await state.set_state(StickerStates.waiting_title)
         await message.answer(err)
         return
+    await state.update_data(stk_file=None)
     kb = None
     sid = await last_sticker_id(bot, name)
     if sid:

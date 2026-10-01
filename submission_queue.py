@@ -43,6 +43,21 @@ def get_submission(sub_id: str) -> Optional[dict]:
     return _load().get(sub_id)
 
 
+def claim_pending(sub_id: str) -> Optional[dict]:
+    """До первого await помечает заявку обрабатываемой.
+
+    Polling работает в одном event loop, поэтому синхронный read-modify-write
+    не даёт двум быстрым нажатиям одновременно опубликовать одну заявку.
+    """
+    data = _load()
+    sub = data.get(sub_id)
+    if not sub or sub.get("status") != "pending":
+        return None
+    sub["status"] = "processing"
+    _save(data)
+    return dict(sub)
+
+
 def set_status(sub_id: str, status: str) -> None:
     data = _load()
     if sub_id in data:

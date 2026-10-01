@@ -1228,7 +1228,7 @@ async def render(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
         await callback.message.answer("не получилось собрать скрин, попробуй убрать последнее")
         raise
 
-    caption = "мем-машина без вкуса и совести: @randomem_bot"
+    caption = await ui.bot_caption(bot)
     if len(pages) == 1:
         # кнопка «в стикеры» живёт под самой картинкой: колбэк берёт file_id
         # прямо из сообщения, поэтому она работает и после перезапуска бота
