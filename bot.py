@@ -38,7 +38,7 @@ from aiogram.types import (
 )
 
 from phrasebank import get_random_phrase, parse_phrase, add_phrase, load_phrases
-from phrase_categories import ABSURD, CATEGORIES, GENERAL, HARD, INTELLECTUAL
+from phrase_categories import ALL, ABSURD, DECK_CATEGORIES, HARD, INTELLECTUAL
 from memegen import make_meme, make_classic_meme, make_demotivator, FONT_CHOICES_BY_ID
 import stats
 import submission_queue
@@ -179,7 +179,7 @@ def remember_render(data: dict, render_id: str, entry: dict) -> dict:
 
 
 def random_render_entry(source_file_id: str, rendered_file_id: str, phrase: str,
-                        category: str = GENERAL) -> dict:
+                        category: str = ALL) -> dict:
     """Единая форма записи: все кнопки старого мема получают и фото, и фразу."""
     return {
         "source_file_id": source_file_id,
@@ -233,7 +233,7 @@ def try_again_kb(render_id: str, submitted: bool = False) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=BTN_ANOTHER_CAPTION,
-                                  callback_data=f"reroll:{GENERAL}:{render_id}"),
+                                  callback_data=f"reroll:{ALL}:{render_id}"),
              submit_btn],
             [InlineKeyboardButton(text=BTN_MORE_ABSURD,
                                   callback_data=f"reroll:{ABSURD}:{render_id}"),
@@ -805,7 +805,7 @@ async def reroll_by_category(callback: CallbackQuery, state: FSMContext, bot: Bo
     except ValueError:
         await callback.answer("кнопка сломалась, сделай новый мем", show_alert=True)
         return
-    if category not in CATEGORIES:
+    if category not in DECK_CATEGORIES:
         await callback.answer("не знаю такую категорию", show_alert=True)
         return
     await reroll_meme(callback, state, bot, render_id, category)
@@ -815,7 +815,7 @@ async def reroll_by_category(callback: CallbackQuery, state: FSMContext, bot: Bo
 async def try_again(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     """Совместимость со старыми сообщениями, отправленными до новых кнопок."""
     render_id = callback.data.split(":", 1)[1]
-    await reroll_meme(callback, state, bot, render_id, GENERAL)
+    await reroll_meme(callback, state, bot, render_id, ALL)
 
 
 @dp.callback_query(F.data.startswith("submit_last:"))

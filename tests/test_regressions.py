@@ -16,7 +16,7 @@ os.environ["DATA_DIR"] = _IMPORT_DATA.name
 import bot
 from aiogram.fsm.storage.base import StorageKey
 import phrasebank
-from phrase_categories import ABSURD, GENERAL, HARD, INTELLECTUAL, classify_phrase
+from phrase_categories import ALL, ABSURD, GENERAL, HARD, INTELLECTUAL, classify_phrase
 import render_store
 import stats
 import stickers
@@ -30,7 +30,7 @@ class RenderHistoryTests(unittest.TestCase):
         self.assertEqual(entry["source_file_id"], "source")
         self.assertEqual(
             entry["spec"],
-            {"kind": "random", "phrase": "верх|низ", "category": GENERAL},
+            {"kind": "random", "phrase": "верх|низ", "category": ALL},
         )
 
     def test_new_render_keyboard_contains_all_phrase_modes(self):
@@ -40,7 +40,7 @@ class RenderHistoryTests(unittest.TestCase):
             for button in row
             if button.callback_data
         }
-        self.assertIn(f"reroll:{GENERAL}:render42", callbacks)
+        self.assertIn(f"reroll:{ALL}:render42", callbacks)
         self.assertIn(f"reroll:{ABSURD}:render42", callbacks)
         self.assertIn(f"reroll:{HARD}:render42", callbacks)
         self.assertIn(f"reroll:{INTELLECTUAL}:render42", callbacks)
@@ -137,6 +137,13 @@ class PhraseCategoryTests(unittest.TestCase):
         flattened = [phrase for phrases in pools.values() for phrase in phrases]
         self.assertEqual(len(flattened), phrasebank.phrase_count())
         self.assertTrue(all(pools.values()))
+
+    def test_all_pool_contains_every_category(self):
+        pools = phrasebank.load_categorized_phrases()
+        self.assertCountEqual(
+            phrasebank.load_phrases(ALL),
+            [phrase for phrases in pools.values() for phrase in phrases],
+        )
 
     def test_category_cache_notices_an_added_user_phrase(self):
         with tempfile.TemporaryDirectory() as tmp:

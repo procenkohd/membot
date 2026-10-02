@@ -11,12 +11,14 @@ from __future__ import annotations
 import re
 
 
+ALL = "all"
 GENERAL = "general"
 ABSURD = "absurd"
 HARD = "hard"
 INTELLECTUAL = "intellectual"
 
 CATEGORIES = (GENERAL, ABSURD, HARD, INTELLECTUAL)
+DECK_CATEGORIES = (ALL,) + CATEGORIES
 
 
 # Не только мат, но и грубая лексика: обычная колода не должна внезапно

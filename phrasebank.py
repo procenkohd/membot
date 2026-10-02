@@ -10,7 +10,7 @@ import random
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
-from phrase_categories import CATEGORIES, GENERAL, classify_phrase
+from phrase_categories import ALL, CATEGORIES, DECK_CATEGORIES, classify_phrase
 from storage import data_path
 
 PHRASES_FILE = Path(__file__).parent / "phrases.txt"
@@ -71,9 +71,10 @@ def load_phrases(category: Optional[str] = None) -> List[str]:
     подходящей колоде.
     """
     categorized = load_categorized_phrases()
-    if category is not None:
-        return categorized.get(category, categorized[GENERAL]).copy()
-    return [phrase for name in CATEGORIES for phrase in categorized[name]]
+    all_phrases = [phrase for name in CATEGORIES for phrase in categorized[name]]
+    if category is None or category == ALL:
+        return all_phrases
+    return categorized.get(category, all_phrases).copy()
 
 
 def parse_phrase(phrase: str) -> Tuple[str, Optional[str]]:
@@ -105,17 +106,17 @@ def _pool_signature(phrases: List[str]) -> str:
     return hashlib.sha256(payload).hexdigest()[:16]
 
 
-def get_random_phrase(chat_id: int, category: str = GENERAL) -> str:
+def get_random_phrase(chat_id: int, category: str = ALL) -> str:
     """
     Возвращает случайную фразу для конкретного чата так, чтобы фразы
     не повторялись, пока не будет пройдена вся база. При изменении
     базы (добавлении новых строк) колода пересобирается автоматически.
     """
-    if category not in CATEGORIES:
-        category = GENERAL
+    if category not in DECK_CATEGORIES:
+        category = ALL
     phrases = load_phrases(category)
-    if not phrases and category != GENERAL:
-        category = GENERAL
+    if not phrases and category != ALL:
+        category = ALL
         phrases = load_phrases(category)
     if not phrases:
         return "тут пусто|как и внутри"
