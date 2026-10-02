@@ -15,6 +15,8 @@ os.environ["DATA_DIR"] = _IMPORT_DATA.name
 
 import bot
 from aiogram.fsm.storage.base import StorageKey
+import phrasebank
+from phrase_categories import ABSURD, GENERAL, HARD, INTELLECTUAL, classify_phrase
 import render_store
 import stats
 import stickers
@@ -26,7 +28,22 @@ class RenderHistoryTests(unittest.TestCase):
     def test_random_entry_always_keeps_phrase_for_repic(self):
         entry = bot.random_render_entry("source", "rendered", "верх|низ")
         self.assertEqual(entry["source_file_id"], "source")
-        self.assertEqual(entry["spec"], {"kind": "random", "phrase": "верх|низ"})
+        self.assertEqual(
+            entry["spec"],
+            {"kind": "random", "phrase": "верх|низ", "category": GENERAL},
+        )
+
+    def test_new_render_keyboard_contains_all_phrase_modes(self):
+        callbacks = {
+            button.callback_data
+            for row in bot.try_again_kb("render42").inline_keyboard
+            for button in row
+            if button.callback_data
+        }
+        self.assertIn(f"reroll:{GENERAL}:render42", callbacks)
+        self.assertIn(f"reroll:{ABSURD}:render42", callbacks)
+        self.assertIn(f"reroll:{HARD}:render42", callbacks)
+        self.assertIn(f"reroll:{INTELLECTUAL}:render42", callbacks)
 
     def test_text_limits_are_reported_before_queueing(self):
         self.assertIsNone(bot.validate_text("нормально", 20))
@@ -106,6 +123,54 @@ class SQLiteStorageTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             asyncio.run(scenario(Path(tmp) / "fsm.sqlite3"))
+
+
+class PhraseCategoryTests(unittest.TestCase):
+    def test_representative_phrases_are_classified(self):
+        self.assertEqual(classify_phrase("обычный день и обычный стул"), GENERAL)
+        self.assertEqual(classify_phrase("гусь назначил совещание"), ABSURD)
+        self.assertEqual(classify_phrase("какая-то блядская бухгалтерия"), HARD)
+        self.assertEqual(classify_phrase("онтология домашнего тапка"), INTELLECTUAL)
+
+    def test_every_phrase_belongs_to_exactly_one_category(self):
+        pools = phrasebank.load_categorized_phrases()
+        flattened = [phrase for phrases in pools.values() for phrase in phrases]
+        self.assertEqual(len(flattened), phrasebank.phrase_count())
+        self.assertTrue(all(pools.values()))
+
+    def test_category_cache_notices_an_added_user_phrase(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            main = Path(tmp) / "phrases.txt"
+            user = Path(tmp) / "phrases_user.txt"
+            uncensored = Path(tmp) / "phrases_uncensored.txt"
+            main.write_text("обычная фраза\n", encoding="utf-8")
+            uncensored.write_text("", encoding="utf-8")
+            with patch.object(phrasebank, "PHRASES_FILE", main), \
+                    patch.object(phrasebank, "USER_PHRASES_FILE", user), \
+                    patch.object(phrasebank, "UNCENSORED_PHRASES_FILE", uncensored), \
+                    patch.object(phrasebank, "_categorized_cache_key", None), \
+                    patch.object(phrasebank, "_categorized_cache", None):
+                self.assertEqual(phrasebank.load_phrases(GENERAL), ["обычная фраза"])
+                user.write_text("гусь назначил совещание\n", encoding="utf-8")
+                self.assertEqual(
+                    phrasebank.load_phrases(ABSURD), ["гусь назначил совещание"])
+
+    def test_each_category_has_its_own_non_repeating_deck(self):
+        pools = {
+            GENERAL: ["обычная 1", "обычная 2", "обычная 3"],
+            ABSURD: ["гусь 1", "гусь 2"],
+            HARD: ["жёсткая 1"],
+            INTELLECTUAL: ["умная 1"],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "state.json"
+            with patch.object(phrasebank, "STATE_FILE", state_file), \
+                    patch.object(phrasebank, "load_phrases",
+                                 side_effect=lambda category=None: pools[category or GENERAL]):
+                general = {phrasebank.get_random_phrase(1, GENERAL) for _ in range(3)}
+                absurd = {phrasebank.get_random_phrase(1, ABSURD) for _ in range(2)}
+        self.assertEqual(general, set(pools[GENERAL]))
+        self.assertEqual(absurd, set(pools[ABSURD]))
 
 
 if __name__ == "__main__":

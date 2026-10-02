@@ -4,16 +4,22 @@
 пока не закончится, а потом тасуется заново.
 """
 
+import hashlib
 import json
 import random
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional
 
+from phrase_categories import CATEGORIES, GENERAL, classify_phrase
 from storage import data_path
 
 PHRASES_FILE = Path(__file__).parent / "phrases.txt"
+UNCENSORED_PHRASES_FILE = Path(__file__).parent / "phrases_uncensored.txt"
 USER_PHRASES_FILE = data_path("phrases_user.txt")
 STATE_FILE = data_path("state.json")
+
+_categorized_cache_key: tuple | None = None
+_categorized_cache: Dict[str, List[str]] | None = None
 
 
 def _read_lines(path: Path) -> List[str]:
@@ -28,15 +34,46 @@ def _read_lines(path: Path) -> List[str]:
     return lines
 
 
-def load_phrases() -> List[str]:
+def _source_signature() -> tuple:
+    signature = []
+    for path in (PHRASES_FILE, USER_PHRASES_FILE, UNCENSORED_PHRASES_FILE):
+        try:
+            stat = path.stat()
+            signature.append((str(path), stat.st_mtime_ns, stat.st_size))
+        except FileNotFoundError:
+            signature.append((str(path), None, None))
+    return tuple(signature)
+
+
+def load_categorized_phrases() -> Dict[str, List[str]]:
+    """Загружает всю базу и назначает каждой фразе ровно одну категорию."""
+    global _categorized_cache_key, _categorized_cache
+    cache_key = _source_signature()
+    if cache_key == _categorized_cache_key and _categorized_cache is not None:
+        return {name: phrases.copy() for name, phrases in _categorized_cache.items()}
+
+    result = {category: [] for category in CATEGORIES}
+    for phrase in _read_lines(PHRASES_FILE) + _read_lines(USER_PHRASES_FILE):
+        result[classify_phrase(phrase)].append(phrase)
+    for phrase in _read_lines(UNCENSORED_PHRASES_FILE):
+        result[classify_phrase(phrase)].append(phrase)
+    _categorized_cache_key = cache_key
+    _categorized_cache = {name: phrases.copy() for name, phrases in result.items()}
+    return result
+
+
+def load_phrases(category: Optional[str] = None) -> List[str]:
     """
     Читает базу фраз заново при каждом вызове — можно дополнять файлы на лету.
-    Собирается из двух файлов: phrases.txt (общая база, можно пополнять
-    файлом целиком) и phrases_user.txt (фразы, одобренные через бота) —
-    так массовая загрузка файла в phrases.txt не затирает то, что уже
-    добавили пользователи через бота.
+    Собирается из phrases.txt, редакционной пачки phrases_uncensored.txt и
+    phrases_user.txt (фразы, одобренные через бота). Рубрикация выполняется
+    при чтении, поэтому новые пользовательские строки сразу оказываются в
+    подходящей колоде.
     """
-    return _read_lines(PHRASES_FILE) + _read_lines(USER_PHRASES_FILE)
+    categorized = load_categorized_phrases()
+    if category is not None:
+        return categorized.get(category, categorized[GENERAL]).copy()
+    return [phrase for name in CATEGORIES for phrase in categorized[name]]
 
 
 def parse_phrase(phrase: str) -> Tuple[str, Optional[str]]:
@@ -63,32 +100,45 @@ def _save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def get_random_phrase(chat_id: int) -> str:
+def _pool_signature(phrases: List[str]) -> str:
+    payload = "\0".join(phrases).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def get_random_phrase(chat_id: int, category: str = GENERAL) -> str:
     """
     Возвращает случайную фразу для конкретного чата так, чтобы фразы
     не повторялись, пока не будет пройдена вся база. При изменении
     базы (добавлении новых строк) колода пересобирается автоматически.
     """
-    phrases = load_phrases()
+    if category not in CATEGORIES:
+        category = GENERAL
+    phrases = load_phrases(category)
+    if not phrases and category != GENERAL:
+        category = GENERAL
+        phrases = load_phrases(category)
     if not phrases:
         return "тут пусто|как и внутри"
 
     state = _load_state()
     chat_key = str(chat_id)
     chat_state = state.get(chat_key, {})
+    decks = chat_state.get("decks", {})
+    category_state = decks.get(category, {})
 
-    deck = chat_state.get("deck", [])
-    known_count = chat_state.get("total", 0)
+    deck = category_state.get("deck", [])
+    signature = _pool_signature(phrases)
 
-    # если база фраз изменилась (пополнилась) — пересобираем колоду
-    if not deck or known_count != len(phrases):
+    # Старая state.json мигрирует сама: в ней нет словаря decks.
+    if not deck or category_state.get("signature") != signature:
         deck = list(range(len(phrases)))
         random.shuffle(deck)
 
     index = deck.pop()
     phrase = phrases[index] if index < len(phrases) else random.choice(phrases)
 
-    state[chat_key] = {"deck": deck, "total": len(phrases)}
+    decks[category] = {"deck": deck, "signature": signature}
+    state[chat_key] = {"decks": decks}
     _save_state(state)
 
     return phrase
@@ -103,3 +153,7 @@ def add_phrase(new_phrase: str) -> None:
 
 def phrase_count() -> int:
     return len(load_phrases())
+
+
+def phrase_counts_by_category() -> Dict[str, int]:
+    return {name: len(items) for name, items in load_categorized_phrases().items()}

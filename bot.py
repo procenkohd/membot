@@ -38,6 +38,7 @@ from aiogram.types import (
 )
 
 from phrasebank import get_random_phrase, parse_phrase, add_phrase, load_phrases
+from phrase_categories import ABSURD, CATEGORIES, GENERAL, HARD, INTELLECTUAL
 from memegen import make_meme, make_classic_meme, make_demotivator, FONT_CHOICES_BY_ID
 import stats
 import submission_queue
@@ -132,8 +133,11 @@ BTN_PACKS = stickers.BTN_PACKS
 BTN_SUBMIT = "📮 Предложить в канал"
 BTN_HELP = "❓ Помощь"
 BTN_CANCEL = ui.BTN_CANCEL
-BTN_TRY_AGAIN = "🔁 Попробуй ещё"
 BTN_REPIC = "🖼 Другая картинка"
+BTN_ANOTHER_CAPTION = "🎲 Другая подпись"
+BTN_MORE_ABSURD = "🤡 Сделай абсурднее"
+BTN_HARDER = "☠️ Сделай жёстче"
+BTN_SMARTER = "🧠 Сделай интеллектуальнее"
 
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
@@ -174,12 +178,13 @@ def remember_render(data: dict, render_id: str, entry: dict) -> dict:
     return renders
 
 
-def random_render_entry(source_file_id: str, rendered_file_id: str, phrase: str) -> dict:
+def random_render_entry(source_file_id: str, rendered_file_id: str, phrase: str,
+                        category: str = GENERAL) -> dict:
     """Единая форма записи: все кнопки старого мема получают и фото, и фразу."""
     return {
         "source_file_id": source_file_id,
         "rendered_file_id": rendered_file_id,
-        "spec": {"kind": "random", "phrase": phrase},
+        "spec": {"kind": "random", "phrase": phrase, "category": category},
     }
 
 
@@ -227,8 +232,15 @@ def try_again_kb(render_id: str, submitted: bool = False) -> InlineKeyboardMarku
     )
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=BTN_TRY_AGAIN, callback_data=f"try_again:{render_id}"),
+            [InlineKeyboardButton(text=BTN_ANOTHER_CAPTION,
+                                  callback_data=f"reroll:{GENERAL}:{render_id}"),
              submit_btn],
+            [InlineKeyboardButton(text=BTN_MORE_ABSURD,
+                                  callback_data=f"reroll:{ABSURD}:{render_id}"),
+             InlineKeyboardButton(text=BTN_HARDER,
+                                  callback_data=f"reroll:{HARD}:{render_id}")],
+            [InlineKeyboardButton(text=BTN_SMARTER,
+                                  callback_data=f"reroll:{INTELLECTUAL}:{render_id}")],
             [InlineKeyboardButton(text=BTN_REPIC, callback_data=f"repic:{render_id}"),
              stickers.sticker_btn()],
         ]
@@ -396,6 +408,8 @@ def build_help_text() -> str:
         f"{BTN_SUBMIT} — предложить мем в канал (после ручной проверки)\n"
         f"{BTN_PACKS} — свои стикерпаки: под каждым мемом есть кнопка "
         "«в стикеры», можно и просто накидать своих картинок\n\n"
+        "под готовым мемом можно отдельно попросить другую, абсурдную, "
+        "жёсткую или интеллектуальную подпись — картинка останется той же\n\n"
         "команды (для тех кто любит текстом):\n"
         "/add текст — то же самое что кнопка, но одним сообщением\n"
         "/reset — сбросить очередь показанных фраз для этого чата"
@@ -739,28 +753,37 @@ async def handle_document_photo(message: Message, state: FSMContext, bot: Bot) -
     await sent.edit_reply_markup(reply_markup=try_again_kb(render_id))
 
 
-@dp.callback_query(F.data.startswith("try_again:"))
-async def try_again(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    render_id = callback.data.split(":", 1)[1]
+async def reroll_meme(callback: CallbackQuery, state: FSMContext, bot: Bot,
+                      render_id: str, category: str) -> None:
+    """Рисует новую фразу выбранной категории поверх исходной фотографии."""
     entry = await find_render(callback, state, render_id)
     if not entry:
         await callback.answer("не нашёл предыдущее фото, кинь новое", show_alert=True)
         return
-    file_id = entry["source_file_id"]
+    file_id = entry.get("source_file_id")
+    if not file_id:
+        await callback.answer("исходное фото не сохранилось, кинь его заново",
+                              show_alert=True)
+        return
 
     await callback.answer()
 
-    file = await bot.get_file(file_id)
-    file_bytes = await bot.download_file(file.file_path)
-    image_bytes = file_bytes.read()
+    try:
+        file = await bot.get_file(file_id)
+        file_bytes = await bot.download_file(file.file_path)
+        image_bytes = file_bytes.read()
+    except Exception:
+        logger.exception("Failed to download source photo for reroll")
+        await callback.message.answer("не получилось достать исходное фото, кинь его заново")
+        return
 
-    phrase = get_random_phrase(callback.message.chat.id)
+    phrase = get_random_phrase(callback.message.chat.id, category)
     top, bottom = parse_phrase(phrase)
 
     try:
         meme_buf = make_meme(image_bytes, top, bottom or "")
     except Exception:
-        logger.exception("Failed to render meme (try again)")
+        logger.exception("Failed to render meme reroll for category %s", category)
         await callback.message.answer("что-то пошло не так, но это тоже часть постиронии")
         return
 
@@ -769,10 +792,30 @@ async def try_again(callback: CallbackQuery, state: FSMContext, bot: Bot) -> Non
         BufferedInputFile(meme_buf.read(), filename="meme.jpg"),
         caption=await ui.bot_caption(bot),
     )
-    entry = random_render_entry(file_id, sent.photo[-1].file_id, phrase)
+    entry = random_render_entry(file_id, sent.photo[-1].file_id, phrase, category)
     await persist_render(
         state, new_id, entry, callback.message.chat.id, callback.from_user.id)
     await sent.edit_reply_markup(reply_markup=try_again_kb(new_id))
+
+
+@dp.callback_query(F.data.startswith("reroll:"))
+async def reroll_by_category(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    try:
+        _, category, render_id = callback.data.split(":", 2)
+    except ValueError:
+        await callback.answer("кнопка сломалась, сделай новый мем", show_alert=True)
+        return
+    if category not in CATEGORIES:
+        await callback.answer("не знаю такую категорию", show_alert=True)
+        return
+    await reroll_meme(callback, state, bot, render_id, category)
+
+
+@dp.callback_query(F.data.startswith("try_again:"))
+async def try_again(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    """Совместимость со старыми сообщениями, отправленными до новых кнопок."""
+    render_id = callback.data.split(":", 1)[1]
+    await reroll_meme(callback, state, bot, render_id, GENERAL)
 
 
 @dp.callback_query(F.data.startswith("submit_last:"))
