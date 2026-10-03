@@ -39,7 +39,13 @@ from aiogram.types import (
 
 from phrasebank import get_random_phrase, parse_phrase, add_phrase, load_phrases
 from phrase_categories import ALL, ABSURD, DECK_CATEGORIES, HARD, INTELLECTUAL
-from memegen import make_meme, make_classic_meme, make_demotivator, FONT_CHOICES_BY_ID
+from memegen import (
+    CUSTOM_FONT_IDS,
+    FONT_CHOICES_BY_ID,
+    make_classic_meme,
+    make_demotivator,
+    make_meme,
+)
 import stats
 import submission_queue
 import chatflow
@@ -272,7 +278,8 @@ def custom_format_kb() -> InlineKeyboardMarkup:
 def custom_font_kb() -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text=choice["label"], callback_data=f"custom_font:{font_id}")]
-        for font_id, choice in FONT_CHOICES_BY_ID.items()
+        for font_id in CUSTOM_FONT_IDS
+        for choice in (FONT_CHOICES_BY_ID[font_id],)
     ]
     rows.append([InlineKeyboardButton(text="🎲 Любой (рандом)", callback_data="custom_font:random")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

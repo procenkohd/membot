@@ -15,9 +15,11 @@ os.environ["DATA_DIR"] = _IMPORT_DATA.name
 
 import bot
 from aiogram.fsm.storage.base import StorageKey
+import memegen
 import phrasebank
 from phrase_categories import ALL, ABSURD, GENERAL, HARD, INTELLECTUAL, classify_phrase
 import render_store
+from smart_layout import VisualAnalysis
 import stats
 import stickers
 import submission_queue
@@ -78,6 +80,65 @@ class StickerTests(unittest.TestCase):
         data = asyncio.run(stickers.to_sticker_bytes(FakeBot(), "file"))
         self.assertIsNotNone(data)
         self.assertLessEqual(len(data), stickers.STICKER_MAX_BYTES)
+
+
+class SmartMemeLayoutTests(unittest.TestCase):
+    @staticmethod
+    def image_bytes(size=(600, 900)) -> bytes:
+        source = BytesIO()
+        Image.new("RGB", size, "#777777").save(source, "JPEG")
+        return source.getvalue()
+
+    def test_custom_classic_meme_does_not_run_image_analysis(self):
+        with patch.object(memegen, "analyze_image") as analyze:
+            result = memegen.make_classic_meme(
+                self.image_bytes(), "мой верх", "мой низ",
+                font_choice=memegen.FONT_CHOICES_BY_ID["oswald"],
+            )
+        analyze.assert_not_called()
+        self.assertGreater(len(result.getvalue()), 0)
+
+    def test_custom_font_menu_keeps_only_original_three_fonts(self):
+        callbacks = [
+            button.callback_data
+            for row in bot.custom_font_kb().inline_keyboard
+            for button in row
+            if button.callback_data != "custom_font:random"
+        ]
+        self.assertEqual(
+            callbacks,
+            [f"custom_font:{font_id}" for font_id in memegen.CUSTOM_FONT_IDS],
+        )
+        self.assertNotIn("custom_font:inter", callbacks)
+        self.assertNotIn("custom_font:pt_serif", callbacks)
+
+    def test_random_classic_meme_enables_smart_layout(self):
+        fake_result = BytesIO(b"result")
+        with patch.object(memegen.random, "random", return_value=1.0), \
+                patch.object(memegen, "make_classic_meme", return_value=fake_result) as classic:
+            result = memegen.make_meme(self.image_bytes(), "верх", "низ")
+        self.assertIs(result, fake_result)
+        self.assertTrue(classic.call_args.kwargs["smart_layout"])
+
+    def test_face_regions_receive_a_large_layout_penalty(self):
+        analysis = VisualAnalysis(
+            image_size=(600, 900),
+            detail_map=Image.new("L", (120, 180), 0),
+            faces=[(180, 120, 240, 240)],
+        )
+        over_face = analysis.score((140, 100, 320, 300))
+        clear_bottom = analysis.score((40, 650, 520, 160))
+        self.assertGreater(over_face, clear_bottom + 10)
+
+    def test_area_below_a_face_gets_a_soft_subject_penalty(self):
+        analysis = VisualAnalysis(
+            image_size=(600, 900),
+            detail_map=Image.new("L", (120, 180), 0),
+            faces=[(240, 100, 100, 100)],
+        )
+        over_body = analysis.score((190, 240, 220, 300))
+        clear_side = analysis.score((10, 240, 120, 300))
+        self.assertGreater(over_body, clear_side)
 
 
 class SubmissionTests(unittest.TestCase):
