@@ -131,7 +131,7 @@ def current_speaker(draft: dict) -> str:
 
 
 def _hhmm(minutes: int) -> str:
-    return f"{(minutes // 60) % 24}:{minutes % 60:02d}"
+    return f"{(minutes // 60) % 24:02d}:{minutes % 60:02d}"
 
 
 def _start_minutes(draft: dict) -> int:
@@ -154,6 +154,17 @@ def item_times(draft: dict) -> list:
             acc_seconds += step
         out.append(_hhmm(minutes + acc_seconds // 60))
     return out
+
+
+def status_clock(draft: dict) -> str:
+    """Время на телефоне в момент скриншота.
+
+    Выбранное в мастере время относится к первой реплике. Статус-бар должен
+    быть не раньше сообщений, поэтому берём время последнего элемента. Это
+    также естественно работает при переходе через полночь: 23:58 -> 00:02.
+    """
+    times = item_times(draft)
+    return times[-1] if times else draft.get("start", "12:00")
 
 
 VISIBLE_ITEMS = 15      # длиннее список не влезет в лимит сообщения телеграма
@@ -410,7 +421,7 @@ async def render_draft(bot: Bot, draft: dict) -> list:
         # без сида: иначе при одинаковом числе реплик счётчик повторяется
         unread=random.choice((None, random.randint(1, 12), random.randint(13, 400),
                               random.randint(400, 9999))),
-        clock=draft["start"],
+        clock=status_clock(draft),
     )
 
 
@@ -670,7 +681,7 @@ async def pick_theme(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
-    await callback.message.answer("во сколько идёт переписка?", reply_markup=kb)
+    await callback.message.answer("во сколько начинается переписка?", reply_markup=kb)
 
 
 @router.callback_query(F.data.startswith("chat:time:"))

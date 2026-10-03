@@ -15,6 +15,7 @@ os.environ["DATA_DIR"] = _IMPORT_DATA.name
 
 import bot
 from aiogram.fsm.storage.base import StorageKey
+import chatflow
 import memegen
 import phrasebank
 from phrase_categories import ALL, ABSURD, GENERAL, HARD, INTELLECTUAL, classify_phrase
@@ -80,6 +81,32 @@ class StickerTests(unittest.TestCase):
         data = asyncio.run(stickers.to_sticker_bytes(FakeBot(), "file"))
         self.assertIsNotNone(data)
         self.assertLessEqual(len(data), stickers.STICKER_MAX_BYTES)
+
+
+class ChatTimelineTests(unittest.TestCase):
+    @staticmethod
+    def draft(start: str, step: int, count: int) -> dict:
+        draft = chatflow.blank_draft()
+        draft["start"] = start
+        draft["step"] = step
+        draft["items"] = [
+            {"kind": "text", "text": str(index), "out": bool(index % 2)}
+            for index in range(count)
+        ]
+        return draft
+
+    def test_phone_clock_matches_last_message_instead_of_chat_start(self):
+        draft = self.draft("14:50", 120, 5)
+        self.assertEqual(chatflow.item_times(draft)[-1], "14:58")
+        self.assertEqual(chatflow.status_clock(draft), "14:58")
+
+    def test_phone_clock_handles_messages_after_midnight(self):
+        draft = self.draft("23:58", 120, 3)
+        self.assertEqual(chatflow.item_times(draft), ["23:58", "00:00", "00:02"])
+        self.assertEqual(chatflow.status_clock(draft), "00:02")
+
+    def test_empty_chat_keeps_selected_start_time(self):
+        self.assertEqual(chatflow.status_clock(self.draft("09:41", 60, 0)), "09:41")
 
 
 class SmartMemeLayoutTests(unittest.TestCase):
