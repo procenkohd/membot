@@ -5,6 +5,7 @@
 """
 
 from io import BytesIO
+import logging
 from pathlib import Path
 from typing import List, Optional
 import random
@@ -12,6 +13,8 @@ import random
 from PIL import Image, ImageDraw, ImageFont
 
 from smart_layout import Rect, VisualAnalysis, analyze_image
+
+logger = logging.getLogger(__name__)
 
 FONTS_DIR = Path(__file__).parent / "fonts"
 
@@ -44,6 +47,7 @@ CUSTOM_FONT_CHOICES = [FONT_CHOICES_BY_ID[font_id] for font_id in CUSTOM_FONT_ID
 
 DEMOTIVATOR_FONT_PATH = FONTS_DIR / "PTSerif-Italic.ttf"
 DEMOTIVATOR_CHANCE = 0.2  # ~1 мем из 5 выходит демотиватором
+SMART_LAYOUT_CHANCE = 0.65  # остальные классические мемы сохраняют старые верх/низ
 
 MAX_SIDE = 1280  # чтобы не рожать гигантские файлы
 
@@ -70,10 +74,38 @@ def _fit_font_size(image_width: int) -> int:
     return max(24, image_width // 10)
 
 
-def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> List[str]:
+def _split_long_word(draw: ImageDraw.ImageDraw, word: str,
+                     font: ImageFont.FreeTypeFont, max_width: int) -> List[str]:
+    """Аварийно режет слитный текст, если даже минимальный шрифт шире кадра."""
+    chunks: List[str] = []
+    current = ""
+    for char in word:
+        trial = current + char
+        if current and draw.textlength(trial, font=font) > max_width:
+            chunks.append(current)
+            current = char
+        else:
+            current = trial
+    if current:
+        chunks.append(current)
+    return chunks or [word]
+
+
+def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont,
+               max_width: int, break_long_words: bool = False) -> List[str]:
     words = text.split()
     if not words:
         return []
+    if break_long_words:
+        words = [
+            chunk
+            for word in words
+            for chunk in (
+                _split_long_word(draw, word, font, max_width)
+                if draw.textlength(word, font=font) > max_width
+                else [word]
+            )
+        ]
     lines = []
     current = words[0]
     for word in words[1:]:
@@ -104,23 +136,30 @@ def _draw_caption(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeType
         return
 
     display_text = text.upper() if font_choice["upper"] else text
-    lines = _wrap_text(draw, display_text, font, max_width)
     spacing = 6
 
-    # если блок текста не влезает по высоте — на лету уменьшаем шрифт
+    # Уменьшаем блок и по высоте, и по ширине. Раньше одиночное длинное
+    # слово не переносилось, проверялась только высота — из-за этого оно
+    # могло вылезти за левую и правую границы изображения.
     working_font = font
     while True:
-        line_heights = [
-            draw.textbbox((0, 0), line, font=working_font, stroke_width=stroke_width)[3]
-            - draw.textbbox((0, 0), line, font=working_font, stroke_width=stroke_width)[1]
+        emergency_wrap = working_font.size <= 14
+        lines = _wrap_text(
+            draw, display_text, working_font, max_width,
+            break_long_words=emergency_wrap,
+        )
+        boxes = [
+            draw.textbbox((0, 0), line, font=working_font, stroke_width=stroke_width)
             for line in lines
         ]
+        line_heights = [box[3] - box[1] for box in boxes]
+        line_widths = [box[2] - box[0] for box in boxes]
         total_height = sum(line_heights) + spacing * max(0, len(lines) - 1)
-        if total_height <= max_block_height or working_font.size <= 14:
+        fits_width = max(line_widths, default=0) <= max_width
+        if (total_height <= max_block_height and fits_width) or emergency_wrap:
             break
         new_size = max(14, int(working_font.size * 0.85))
         working_font = _load_font(new_size, font_choice)
-        lines = _wrap_text(draw, display_text, working_font, max_width)
 
     img_w, img_h = image_size
     if y_anchor == "top":
@@ -128,11 +167,11 @@ def _draw_caption(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeType
     else:
         y = img_h - total_height - margin
 
-    for i, line in enumerate(lines):
-        w = draw.textlength(line, font=working_font)
-        x = (img_w - w) / 2
+    for i, (line, box) in enumerate(zip(lines, boxes)):
+        line_width = box[2] - box[0]
+        x = (img_w - line_width) / 2 - box[0]
         draw.text(
-            (x, y),
+            (x, y - box[1]),
             line,
             font=working_font,
             fill="white",
@@ -186,7 +225,10 @@ def _layout_in_zone(draw: ImageDraw.ImageDraw, text: str, font_choice: dict,
 
     while size >= 14:
         working_font = _load_font(size, font_choice)
-        lines = _wrap_text(draw, display_text, working_font, width - stroke_width * 2)
+        lines = _wrap_text(
+            draw, display_text, working_font, width - stroke_width * 2,
+            break_long_words=size <= 14,
+        )
         boxes = [draw.textbbox((0, 0), line, font=working_font,
                                stroke_width=stroke_width) for line in lines]
         line_widths = [box[2] - box[0] for box in boxes]
@@ -286,10 +328,14 @@ def _draw_smart_layout(draw: ImageDraw.ImageDraw, layouts: list[tuple[dict, str]
         zone_x, _, zone_w, _ = layout["zone"]
         _, y, _, _ = layout["rect"]
         for line, line_height in zip(layout["lines"], layout["line_heights"]):
-            line_width = draw.textlength(line, font=layout["font"])
-            x = zone_x + (zone_w - line_width) / 2
+            box = draw.textbbox(
+                (0, 0), line, font=layout["font"],
+                stroke_width=layout["stroke_width"],
+            )
+            line_width = box[2] - box[0]
+            x = zone_x + (zone_w - line_width) / 2 - box[0]
             draw.text(
-                (x, y), line, font=layout["font"], fill=color,
+                (x, y - box[1]), line, font=layout["font"], fill=color,
                 stroke_width=layout["stroke_width"], stroke_fill="black",
             )
             y += line_height + layout["spacing"]
@@ -360,7 +406,8 @@ def _split_phrase_for_layout(text: str) -> Optional[tuple]:
 
 def make_classic_meme(image_bytes: bytes, top_text: str, bottom_text: str,
                        font_choice: Optional[dict] = None,
-                       smart_layout: bool = False) -> BytesIO:
+                       smart_layout: bool = False,
+                       random_style: bool = False) -> BytesIO:
     """Классический мем. font_choice можно передать явно (см.
     FONT_CHOICES_BY_ID) — иначе шрифт выбирается рандомно. Умная раскладка
     включается только для случайных мемов; «Свой мем» оставляет верх/низ."""
@@ -398,7 +445,7 @@ def make_classic_meme(image_bytes: bytes, top_text: str, bottom_text: str,
 
     # --- визуальный рандом №2: шрифт, размер и толщина обводки гуляют ---
     font_choice = font_choice or random.choice(
-        FONT_CHOICES if smart_layout else CUSTOM_FONT_CHOICES)
+        FONT_CHOICES if random_style else CUSTOM_FONT_CHOICES)
     base_font_size = _fit_font_size(img.width)
     font_size = int(base_font_size * random.uniform(0.88, 1.12))
     font = _load_font(font_size, font_choice)
@@ -421,6 +468,7 @@ def make_classic_meme(image_bytes: bytes, top_text: str, bottom_text: str,
         except Exception:
             # Анализ — улучшение, а не критическая зависимость. Битое фото,
             # сбой каскада или нехватка памяти не должны ломать выдачу мема.
+            logger.exception("Smart meme layout failed; using fixed top/bottom layout")
             smart_layouts = []
 
     if smart_layouts:
@@ -553,4 +601,9 @@ def make_meme(image_bytes: bytes, top_text: str, bottom_text: str) -> BytesIO:
             caption, subtitle = (top_text or bottom_text), ""
         return make_demotivator(image_bytes, caption, subtitle)
 
-    return make_classic_meme(image_bytes, top_text, bottom_text, smart_layout=True)
+    use_smart_layout = random.random() < SMART_LAYOUT_CHANCE
+    return make_classic_meme(
+        image_bytes, top_text, bottom_text,
+        smart_layout=use_smart_layout,
+        random_style=True,
+    )

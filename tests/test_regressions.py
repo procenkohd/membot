@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 
 _IMPORT_DATA = tempfile.TemporaryDirectory()
@@ -114,11 +114,32 @@ class SmartMemeLayoutTests(unittest.TestCase):
 
     def test_random_classic_meme_enables_smart_layout(self):
         fake_result = BytesIO(b"result")
-        with patch.object(memegen.random, "random", return_value=1.0), \
+        with patch.object(memegen.random, "random", side_effect=[1.0, 0.0]), \
                 patch.object(memegen, "make_classic_meme", return_value=fake_result) as classic:
             result = memegen.make_meme(self.image_bytes(), "верх", "низ")
         self.assertIs(result, fake_result)
         self.assertTrue(classic.call_args.kwargs["smart_layout"])
+        self.assertTrue(classic.call_args.kwargs["random_style"])
+
+    def test_random_classic_meme_can_keep_fixed_top_bottom_layout(self):
+        fake_result = BytesIO(b"result")
+        with patch.object(memegen.random, "random", side_effect=[1.0, 1.0]), \
+                patch.object(memegen, "make_classic_meme", return_value=fake_result) as classic:
+            memegen.make_meme(self.image_bytes(), "верх", "низ")
+        self.assertFalse(classic.call_args.kwargs["smart_layout"])
+        self.assertTrue(classic.call_args.kwargs["random_style"])
+
+    def test_fixed_layout_shrinks_a_long_word_inside_image_edges(self):
+        canvas = Image.new("RGB", (900, 1200), "#123456")
+        draw = ImageDraw.Draw(canvas)
+        choice = memegen.FONT_CHOICES_BY_ID["roboto_condensed"]
+        font = memegen._load_font(90, choice)
+        memegen._draw_caption(
+            draw, "ДОКАЗАТЕЛЬСТВО ТОГО,", font, choice, canvas.size,
+            "top", 876, 6, 384, 12,
+        )
+        self.assertTrue(all(canvas.getpixel((0, y)) == (18, 52, 86) for y in range(1200)))
+        self.assertTrue(all(canvas.getpixel((899, y)) == (18, 52, 86) for y in range(1200)))
 
     def test_face_regions_receive_a_large_layout_penalty(self):
         analysis = VisualAnalysis(
