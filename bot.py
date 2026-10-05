@@ -37,7 +37,7 @@ from aiogram.types import (
     InlineKeyboardButton,
 )
 
-from phrasebank import get_random_phrase, parse_phrase, add_phrase, load_phrases
+from phrasebank import parse_phrase, add_phrase, load_phrases
 from phrase_categories import ALL, ABSURD, DECK_CATEGORIES, HARD, INTELLECTUAL
 from memegen import (
     CUSTOM_FONT_IDS,
@@ -53,6 +53,7 @@ import stickers
 import ui
 import phrase_queue
 import render_store
+from caption_picker import choose_caption, reset_chat as reset_caption_history
 from sqlite_storage import SQLiteStorage
 from storage import data_path
 
@@ -443,6 +444,7 @@ async def cmd_reset(message: Message) -> None:
     state = _load_state()
     state.pop(str(message.chat.id), None)
     _save_state(state)
+    reset_caption_history(message.chat.id)
     await message.answer("колода фраз для этого чата сброшена")
 
 
@@ -712,7 +714,7 @@ async def handle_photo(message: Message, state: FSMContext, bot: Bot) -> None:
     file_bytes = await bot.download_file(file.file_path)
     image_bytes = file_bytes.read()
 
-    phrase = get_random_phrase(message.chat.id)
+    phrase = await choose_caption(image_bytes, message.chat.id, message.from_user.id)
     top, bottom = parse_phrase(phrase)
 
     try:
@@ -740,7 +742,7 @@ async def handle_document_photo(message: Message, state: FSMContext, bot: Bot) -
     file_bytes = await bot.download_file(file.file_path)
     image_bytes = file_bytes.read()
 
-    phrase = get_random_phrase(message.chat.id)
+    phrase = await choose_caption(image_bytes, message.chat.id, message.from_user.id)
     top, bottom = parse_phrase(phrase)
 
     try:
@@ -784,7 +786,10 @@ async def reroll_meme(callback: CallbackQuery, state: FSMContext, bot: Bot,
         await callback.message.answer("не получилось достать исходное фото, кинь его заново")
         return
 
-    phrase = get_random_phrase(callback.message.chat.id, category)
+    phrase = await choose_caption(
+        image_bytes, callback.message.chat.id, callback.from_user.id, category,
+        previous_phrase=entry.get("spec", {}).get("phrase"),
+    )
     top, bottom = parse_phrase(phrase)
 
     try:

@@ -106,7 +106,8 @@ def _pool_signature(phrases: List[str]) -> str:
     return hashlib.sha256(payload).hexdigest()[:16]
 
 
-def get_random_phrase(chat_id: int, category: str = ALL) -> str:
+def get_random_phrase(chat_id: int, category: str = ALL, *,
+                      preferred_topics=(), exclude=()) -> str:
     """
     Возвращает случайную фразу для конкретного чата так, чтобы фразы
     не повторялись, пока не будет пройдена вся база. При изменении
@@ -114,10 +115,10 @@ def get_random_phrase(chat_id: int, category: str = ALL) -> str:
     """
     if category not in DECK_CATEGORIES:
         category = ALL
-    phrases = load_phrases(category)
+    phrases = list(dict.fromkeys(load_phrases(category)))
     if not phrases and category != ALL:
         category = ALL
-        phrases = load_phrases(category)
+        phrases = list(dict.fromkeys(load_phrases(category)))
     if not phrases:
         return "тут пусто|как и внутри"
 
@@ -135,8 +136,29 @@ def get_random_phrase(chat_id: int, category: str = ALL) -> str:
         deck = list(range(len(phrases)))
         random.shuffle(deck)
 
-    index = deck.pop()
-    phrase = phrases[index] if index < len(phrases) else random.choice(phrases)
+    excluded = set(exclude)
+    available = [i for i in deck if 0 <= i < len(phrases) and phrases[i] not in excluded]
+    if not available:
+        # В этой категории закончились новые для фото фразы — переходим
+        # к общей колоде, а не начинаем повторять узкий тематический набор.
+        if category != ALL:
+            return get_random_phrase(chat_id, ALL, exclude=excluded)
+        available = [i for i, phrase in enumerate(phrases) if phrase not in excluded]
+        if not available:
+            available = list(range(len(phrases)))  # вся база исчерпана
+        deck = available.copy()
+        random.shuffle(deck)
+        available = deck.copy()
+
+    preferred = []
+    if preferred_topics:
+        from photo_topics import phrase_topics
+        topics = set(preferred_topics)
+        preferred = [i for i in available if topics.intersection(phrase_topics(phrases[i]))]
+    # Тематическая фраза изымается из той же колоды, что обычный рандом.
+    index = random.choice(preferred) if preferred else available[-1]
+    deck.remove(index)
+    phrase = phrases[index]
 
     decks[category] = {"deck": deck, "signature": signature}
     state[chat_key] = {"decks": decks}

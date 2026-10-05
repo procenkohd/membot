@@ -5,16 +5,11 @@
 """
 
 from io import BytesIO
-import logging
 from pathlib import Path
 from typing import List, Optional
 import random
 
 from PIL import Image, ImageDraw, ImageFont
-
-from smart_layout import Rect, VisualAnalysis, analyze_image
-
-logger = logging.getLogger(__name__)
 
 FONTS_DIR = Path(__file__).parent / "fonts"
 
@@ -41,13 +36,12 @@ FONT_CHOICES_BY_ID = {
 FONT_CHOICES = list(FONT_CHOICES_BY_ID.values())
 # «Свой мем» намеренно остаётся простым и предсказуемым: знакомые три
 # шрифта, выбранные пользователем, и фиксированные верх/низ. Новые стили
-# участвуют только в случайной умной выдаче.
+# участвуют только в случайной выдаче.
 CUSTOM_FONT_IDS = ("oswald", "roboto_condensed", "rubik")
 CUSTOM_FONT_CHOICES = [FONT_CHOICES_BY_ID[font_id] for font_id in CUSTOM_FONT_IDS]
 
 DEMOTIVATOR_FONT_PATH = FONTS_DIR / "PTSerif-Italic.ttf"
 DEMOTIVATOR_CHANCE = 0.2  # ~1 мем из 5 выходит демотиватором
-SMART_LAYOUT_CHANCE = 0.65  # остальные классические мемы сохраняют старые верх/низ
 
 MAX_SIDE = 1280  # чтобы не рожать гигантские файлы
 
@@ -181,166 +175,6 @@ def _draw_caption(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeType
         y += line_heights[i] + spacing
 
 
-ACCENT_COLORS = (
-    "#FFE342",  # жёлтый — классический панч
-    "#65E5FF",  # голубой
-    "#FF79B9",  # розовый
-    "#A8FF60",  # кислотно-зелёный
-)
-
-
-def _candidate_zones(image_size: tuple[int, int], allow_side: bool) -> list[tuple[Rect, bool]]:
-    """Возвращает зоны-кандидаты: пять широких и, для короткого текста,
-    шесть боковых. bool отмечает более тесную боковую зону."""
-    width, height = image_size
-    margin = max(12, int(width * 0.025))
-    full_h = max(90, int(height * 0.27))
-    full_w = width - 2 * margin
-    full_y = (
-        margin,
-        int(height * 0.17),
-        int(height * 0.36),
-        int(height * 0.55),
-        height - full_h - margin,
-    )
-    zones = [((margin, y, full_w, full_h), False) for y in full_y]
-
-    if allow_side:
-        gap = max(12, int(width * 0.025))
-        side_w = (width - 2 * margin - gap) // 2
-        side_h = max(110, int(height * 0.34))
-        for y in (margin, int(height * 0.32), height - side_h - margin):
-            zones.append(((margin, y, side_w, side_h), True))
-            zones.append(((margin + side_w + gap, y, side_w, side_h), True))
-    return zones
-
-
-def _layout_in_zone(draw: ImageDraw.ImageDraw, text: str, font_choice: dict,
-                    base_size: int, stroke_width: int, zone: Rect,
-                    side_zone: bool) -> Optional[dict]:
-    x, y, width, height = zone
-    display_text = text.upper() if font_choice["upper"] else text
-    size = int(base_size * (0.88 if side_zone else 1.0))
-    spacing = max(4, size // 14)
-
-    while size >= 14:
-        working_font = _load_font(size, font_choice)
-        lines = _wrap_text(
-            draw, display_text, working_font, width - stroke_width * 2,
-            break_long_words=size <= 14,
-        )
-        boxes = [draw.textbbox((0, 0), line, font=working_font,
-                               stroke_width=stroke_width) for line in lines]
-        line_widths = [box[2] - box[0] for box in boxes]
-        line_heights = [box[3] - box[1] for box in boxes]
-        total_height = sum(line_heights) + spacing * max(0, len(lines) - 1)
-        max_line_width = max(line_widths, default=0)
-        if total_height <= height and max_line_width <= width:
-            actual_x = x + (width - max_line_width) // 2
-            actual_y = y + (height - total_height) // 2
-            return {
-                "zone": zone,
-                "rect": (actual_x, actual_y, max_line_width, total_height),
-                "font": working_font,
-                "lines": lines,
-                "line_heights": line_heights,
-                "spacing": spacing,
-                "stroke_width": stroke_width,
-                "side": side_zone,
-            }
-        size = max(13, int(size * 0.88))
-    return None
-
-
-def _caption_candidates(draw: ImageDraw.ImageDraw, text: str, font_choice: dict,
-                        base_size: int, stroke_width: int,
-                        image_size: tuple[int, int]) -> list[dict]:
-    allow_side = len(text) <= 54
-    candidates = []
-    for zone, side_zone in _candidate_zones(image_size, allow_side):
-        layout = _layout_in_zone(
-            draw, text, font_choice, base_size, stroke_width, zone, side_zone)
-        if layout:
-            candidates.append(layout)
-    return candidates
-
-
-def _position_bias(layout: dict, image_height: int, role: str) -> float:
-    _, y, _, h = layout["rect"]
-    center = (y + h / 2) / image_height
-    # Узкая боковая зона обычно означает, что на фото действительно нашёлся
-    # свободный фон. Небольшой бонус компенсирует лишнюю строку переноса.
-    side_bonus = -0.08 if layout["side"] else 0.0
-    if role == "setup":
-        return center * 0.35 + side_bonus
-    if role == "punch":
-        return (1.0 - center) * 0.35 + side_bonus
-    return abs(0.5 - center) * 0.12 + side_bonus
-
-
-def _choose_smart_layouts(analysis: VisualAnalysis, draw: ImageDraw.ImageDraw,
-                          top_text: str, bottom_text: str, font_choice: dict,
-                          base_size: int, stroke_width: int) -> list[tuple[dict, str]]:
-    width, height = analysis.image_size
-    if top_text and bottom_text:
-        setups = _caption_candidates(
-            draw, top_text, font_choice, base_size, stroke_width, (width, height))
-        punches = _caption_candidates(
-            draw, bottom_text, font_choice, base_size, stroke_width, (width, height))
-        pairs = []
-        for setup in setups:
-            sx, sy, sw, sh = setup["rect"]
-            setup_center = sy + sh / 2
-            for punch in punches:
-                px, py, pw, ph = punch["rect"]
-                punch_center = py + ph / 2
-                # Сохраняем естественный порядок чтения: завязка выше панча.
-                if punch_center <= setup_center + height * 0.06:
-                    continue
-                score = (
-                    analysis.score(setup["rect"])
-                    + _position_bias(setup, height, "setup")
-                    + analysis.score(punch["rect"], occupied=(setup["rect"],))
-                    + _position_bias(punch, height, "punch")
-                )
-                pairs.append((score, setup, punch))
-        if pairs:
-            _, setup, punch = min(pairs, key=lambda item: item[0])
-            return [(setup, "white"), (punch, random.choice(ACCENT_COLORS))]
-
-    text = top_text or bottom_text
-    if not text:
-        return []
-    candidates = _caption_candidates(
-        draw, text, font_choice, base_size, stroke_width, (width, height))
-    if not candidates:
-        return []
-    chosen = min(
-        candidates,
-        key=lambda layout: analysis.score(layout["rect"])
-        + _position_bias(layout, height, "single"),
-    )
-    return [(chosen, "white")]
-
-
-def _draw_smart_layout(draw: ImageDraw.ImageDraw, layouts: list[tuple[dict, str]]) -> None:
-    for layout, color in layouts:
-        zone_x, _, zone_w, _ = layout["zone"]
-        _, y, _, _ = layout["rect"]
-        for line, line_height in zip(layout["lines"], layout["line_heights"]):
-            box = draw.textbbox(
-                (0, 0), line, font=layout["font"],
-                stroke_width=layout["stroke_width"],
-            )
-            line_width = box[2] - box[0]
-            x = zone_x + (zone_w - line_width) / 2 - box[0]
-            draw.text(
-                (x, y - box[1]), line, font=layout["font"], fill=color,
-                stroke_width=layout["stroke_width"], stroke_fill="black",
-            )
-            y += line_height + layout["spacing"]
-
-
 LONG_PHRASE_CHARS = 50  # длиннее - одним блоком выглядит как стена мелкого текста в одном углу
 
 _SPLIT_CONJUNCTIONS = {
@@ -406,11 +240,10 @@ def _split_phrase_for_layout(text: str) -> Optional[tuple]:
 
 def make_classic_meme(image_bytes: bytes, top_text: str, bottom_text: str,
                        font_choice: Optional[dict] = None,
-                       smart_layout: bool = False,
                        random_style: bool = False) -> BytesIO:
     """Классический мем. font_choice можно передать явно (см.
-    FONT_CHOICES_BY_ID) — иначе шрифт выбирается рандомно. Умная раскладка
-    включается только для случайных мемов; «Свой мем» оставляет верх/низ."""
+    FONT_CHOICES_BY_ID) — иначе шрифт выбирается рандомно. Все подписи
+    белые с чёрной обводкой и остаются в классических позициях верх/низ."""
     img = Image.open(BytesIO(image_bytes)).convert("RGB")
 
     # немного уменьшим слишком большие фото
@@ -457,28 +290,11 @@ def make_classic_meme(image_bytes: bytes, top_text: str, bottom_text: str,
     top_margin = random.randint(8, 22)
     bottom_margin = random.randint(12, 26)
 
-    smart_layouts = []
-    if smart_layout:
-        try:
-            analysis = analyze_image(img)
-            smart_layouts = _choose_smart_layouts(
-                analysis, draw, top_text, bottom_text, font_choice,
-                font_size, stroke_width,
-            )
-        except Exception:
-            # Анализ — улучшение, а не критическая зависимость. Битое фото,
-            # сбой каскада или нехватка памяти не должны ломать выдачу мема.
-            logger.exception("Smart meme layout failed; using fixed top/bottom layout")
-            smart_layouts = []
-
-    if smart_layouts:
-        _draw_smart_layout(draw, smart_layouts)
-    else:
-        max_block_height = int(img.height * 0.32)
-        _draw_caption(draw, top_text, font, font_choice, img.size, "top", max_text_width,
-                      stroke_width, max_block_height, top_margin)
-        _draw_caption(draw, bottom_text, font, font_choice, img.size, "bottom", max_text_width,
-                      stroke_width, max_block_height, bottom_margin)
+    max_block_height = int(img.height * 0.32)
+    _draw_caption(draw, top_text, font, font_choice, img.size, "top", max_text_width,
+                  stroke_width, max_block_height, top_margin)
+    _draw_caption(draw, bottom_text, font, font_choice, img.size, "bottom", max_text_width,
+                  stroke_width, max_block_height, bottom_margin)
 
     buf = BytesIO()
     img.save(buf, format="JPEG", quality=92)
@@ -601,9 +417,7 @@ def make_meme(image_bytes: bytes, top_text: str, bottom_text: str) -> BytesIO:
             caption, subtitle = (top_text or bottom_text), ""
         return make_demotivator(image_bytes, caption, subtitle)
 
-    use_smart_layout = random.random() < SMART_LAYOUT_CHANCE
     return make_classic_meme(
         image_bytes, top_text, bottom_text,
-        smart_layout=use_smart_layout,
         random_style=True,
     )
