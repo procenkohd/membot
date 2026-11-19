@@ -115,7 +115,7 @@ class ClassicMemeLayoutTests(unittest.TestCase):
         Image.new("RGB", size, "#777777").save(source, "JPEG")
         return source.getvalue()
 
-    def test_custom_font_menu_keeps_only_original_three_fonts(self):
+    def test_legacy_font_menu_contains_only_oswald(self):
         callbacks = [
             button.callback_data
             for row in bot.custom_font_kb().inline_keyboard
@@ -128,6 +128,7 @@ class ClassicMemeLayoutTests(unittest.TestCase):
         )
         self.assertNotIn("custom_font:inter", callbacks)
         self.assertNotIn("custom_font:pt_serif", callbacks)
+        self.assertEqual(callbacks, ["custom_font:oswald"])
 
     def test_random_meme_uses_classic_white_top_bottom(self):
         source = self.image_bytes()

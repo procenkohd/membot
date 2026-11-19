@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import usage_stats
 import random
 import re
 import string
@@ -196,6 +197,8 @@ async def create_pack(bot: Bot, user_id: int, title: str, file_id: str) -> tuple
         try:
             await bot.create_new_sticker_set(
                 user_id=user_id, name=name, title=title[:64], stickers=[sticker])
+            usage_stats.record(user_id, "pack")
+            usage_stats.record(user_id, "sticker")
             remember_pack(user_id, name, title[:64])
             return name, None
         except Exception as e:
@@ -218,6 +221,7 @@ async def add_to_pack(bot: Bot, user_id: int, name: str, file_id: str) -> Option
         format="static", emoji_list=[DEFAULT_EMOJI])
     try:
         await bot.add_sticker_to_set(user_id=user_id, name=name, sticker=sticker)
+        usage_stats.record(user_id, "sticker")
         bump_pack(user_id, name)
         return None
     except Exception as e:

@@ -9,16 +9,14 @@ from pathlib import Path
 from typing import List, Optional
 import random
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+import caption_safety
 
 FONTS_DIR = Path(__file__).parent / "fonts"
 
-# Настоящий Impact не поддерживает кириллицу, поэтому для классического
-# мема есть выбор из шрифтов с кириллицей — три жирных капса (Oswald,
-# Roboto Condensed, Rubik), какой выпадет, решает рандом (если не выбран
-# явно, см. font_id в make_classic_meme). Рукописные отсюда выпилены:
-# сначала Marck Script, потом Pacifico — капс с обводкой у них слипается
-# в нечитаемую кашу, а текст в базе сплошь капсом.
+# Старые идентификаторы остаются для совместимости импортов и тестов.
+# Новые классические мемы всегда используют Oswald Bold с кириллицей.
 FONT_CHOICES_BY_ID = {
     "oswald": {"path": FONTS_DIR / "Oswald-Variable.ttf", "weight": 700, "upper": True, "label": "Oswald (капс)"},
     "roboto_condensed": {
@@ -34,10 +32,10 @@ FONT_CHOICES_BY_ID = {
 }
 
 FONT_CHOICES = list(FONT_CHOICES_BY_ID.values())
-# «Свой мем» намеренно остаётся простым и предсказуемым: знакомые три
-# шрифта, выбранные пользователем, и фиксированные верх/низ. Новые стили
-# участвуют только в случайной выдаче.
-CUSTOM_FONT_IDS = ("oswald", "roboto_condensed", "rubik")
+# В интерфейсе выбора шрифта больше нет.
+DEFAULT_FONT_ID = "oswald"
+DEFAULT_FONT = FONT_CHOICES_BY_ID[DEFAULT_FONT_ID]
+CUSTOM_FONT_IDS = (DEFAULT_FONT_ID,)
 CUSTOM_FONT_CHOICES = [FONT_CHOICES_BY_ID[font_id] for font_id in CUSTOM_FONT_IDS]
 
 DEMOTIVATOR_FONT_PATH = FONTS_DIR / "PTSerif-Italic.ttf"
@@ -125,9 +123,9 @@ def _measure_block(draw: ImageDraw.ImageDraw, lines, font, stroke_width) -> int:
 
 def _draw_caption(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont,
                    font_choice: dict, image_size, y_anchor: str, max_width: int, stroke_width: int,
-                   max_block_height: int, margin: int = 14) -> None:
-    if not text:
-        return
+                   max_block_height: int, margin: int = 14) -> int:
+    if not text.strip():
+        return font.size
 
     display_text = text.upper() if font_choice["upper"] else text
     spacing = 6
@@ -137,6 +135,8 @@ def _draw_caption(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeType
     # могло вылезти за левую и правую границы изображения.
     working_font = font
     while True:
+        spacing = min(6, working_font.size // 4)
+        stroke_width = min(stroke_width, working_font.size // 10)
         emergency_wrap = working_font.size <= 14
         lines = _wrap_text(
             draw, display_text, working_font, max_width,
@@ -150,9 +150,11 @@ def _draw_caption(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeType
         line_widths = [box[2] - box[0] for box in boxes]
         total_height = sum(line_heights) + spacing * max(0, len(lines) - 1)
         fits_width = max(line_widths, default=0) <= max_width
-        if (total_height <= max_block_height and fits_width) or emergency_wrap:
+        if total_height <= max_block_height and fits_width:
             break
-        new_size = max(14, int(working_font.size * 0.85))
+        if working_font.size <= 1:
+            raise ValueError("Image too small to fit caption")
+        new_size = max(1, int(working_font.size * 0.85))
         working_font = _load_font(new_size, font_choice)
 
     img_w, img_h = image_size
@@ -173,6 +175,29 @@ def _draw_caption(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeType
             stroke_fill="black",
         )
         y += line_heights[i] + spacing
+    return working_font.size
+
+
+def _prepare_photo(image_bytes: bytes, max_side: int) -> Image.Image:
+    with Image.open(BytesIO(image_bytes)) as original:
+        image = ImageOps.exif_transpose(original).convert("RGB")
+    image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+    # Very narrow photos need a usable canvas; never stretch or crop the photo.
+    return ImageOps.expand(image, (
+        max(0, (320 - image.width) // 2), max(0, (160 - image.height) // 2),
+        max(0, (321 - image.width) // 2), max(0, (161 - image.height) // 2),
+    ), fill="black")
+
+
+def _caption_panel(text: str, width: int) -> Image.Image:
+    """A readable black band whose height follows the complete caption."""
+    panel = Image.new("RGBA", (width, max(256, width * 2)))
+    size = _fit_font_size(width)
+    _draw_caption(ImageDraw.Draw(panel), text, _load_font(size, DEFAULT_FONT),
+                  DEFAULT_FONT, panel.size, "top", width - 28, max(2, size // 14),
+                  panel.height - 28, 14)
+    bbox = panel.getbbox()
+    return panel.crop((0, 0, width, bbox[3] + 14 if bbox else 28))
 
 
 LONG_PHRASE_CHARS = 50  # длиннее - одним блоком выглядит как стена мелкого текста в одном углу
@@ -241,15 +266,12 @@ def _split_phrase_for_layout(text: str) -> Optional[tuple]:
 def make_classic_meme(image_bytes: bytes, top_text: str, bottom_text: str,
                        font_choice: Optional[dict] = None,
                        random_style: bool = False) -> BytesIO:
-    """Классический мем. font_choice можно передать явно (см.
-    FONT_CHOICES_BY_ID) — иначе шрифт выбирается рандомно. Все подписи
-    белые с чёрной обводкой и остаются в классических позициях верх/низ."""
-    img = Image.open(BytesIO(image_bytes)).convert("RGB")
+    """Oswald Bold, белая подпись с чёрной обводкой, верх/низ.
 
-    # немного уменьшим слишком большие фото
-    if max(img.size) > MAX_SIDE:
-        ratio = MAX_SIDE / max(img.size)
-        img = img.resize((int(img.width * ratio), int(img.height * ratio)))
+    font_choice принят для совместимости, но больше не меняет шрифт.
+    random_style разрешает перестановку только автоматически выбранной фразы.
+    """
+    img = _prepare_photo(image_bytes, MAX_SIDE)
 
     # --- визуальный рандом №1: расположение одноблочной фразы ---
     # если фраза не разбита через | на верх/низ:
@@ -257,10 +279,10 @@ def make_classic_meme(image_bytes: bytes, top_text: str, bottom_text: str,
     #     блоком она бы просто ужалась в мелкий текст в одном углу
     #   - короткая - три равновероятных исхода для разнообразия:
     #     остаётся внизу / переезжает одним блоком наверх / режется пополам
-    if top_text and not bottom_text:
+    if random_style and top_text and not bottom_text:
         top_text, bottom_text = "", top_text
 
-    if bottom_text and not top_text:
+    if random_style and bottom_text and not top_text:
         if len(bottom_text) >= LONG_PHRASE_CHARS:
             split = _split_phrase_for_layout(bottom_text)
             if split:
@@ -274,32 +296,36 @@ def make_classic_meme(image_bytes: bytes, top_text: str, bottom_text: str,
                 if split:
                     top_text, bottom_text = split
 
-    draw = ImageDraw.Draw(img)
-
-    # --- визуальный рандом №2: шрифт, размер и толщина обводки гуляют ---
-    font_choice = font_choice or random.choice(
-        FONT_CHOICES if random_style else CUSTOM_FONT_CHOICES)
-    base_font_size = _fit_font_size(img.width)
-    font_size = int(base_font_size * random.uniform(0.88, 1.12))
-    font = _load_font(font_size, font_choice)
-    stroke_width = max(2, font_size // 14) + random.choice([-1, 0, 0, 1])
-    stroke_width = max(2, stroke_width)
-    max_text_width = img.width - 24
-
-    # --- визуальный рандом №3: отступы от краёв немного гуляют ---
-    top_margin = random.randint(8, 22)
-    bottom_margin = random.randint(12, 26)
-
-    max_block_height = int(img.height * 0.32)
-    _draw_caption(draw, top_text, font, font_choice, img.size, "top", max_text_width,
-                  stroke_width, max_block_height, top_margin)
-    _draw_caption(draw, bottom_text, font, font_choice, img.size, "bottom", max_text_width,
-                  stroke_width, max_block_height, bottom_margin)
+    protection = caption_safety.analyze(img)
+    overlays, bands = {}, {}
+    size = _fit_font_size(img.width)
+    for position, text in (("top", top_text), ("bottom", bottom_text)):
+        layer = Image.new("RGBA", img.size)
+        used_size = _draw_caption(
+            ImageDraw.Draw(layer), text, _load_font(size, DEFAULT_FONT), DEFAULT_FONT,
+            img.size, position, img.width - 28, max(2, size // 14), int(img.height * .32), 14)
+        box = layer.getbbox()
+        if box and (used_size < max(18, img.width // 40) or protection.overlaps(box, img.size)):
+            bands[position] = _caption_panel(text, img.width)
+        else:
+            overlays[position] = layer
+    top_height = bands["top"].height if "top" in bands else 0
+    bottom_height = bands["bottom"].height if "bottom" in bands else 0
+    canvas = Image.new("RGB", (img.width, img.height + top_height + bottom_height), "black")
+    canvas.paste(img, (0, top_height))
+    for layer in overlays.values():
+        canvas.paste(layer, (0, top_height), layer)
+    if "top" in bands:
+        canvas.paste(bands["top"], (0, 0), bands["top"])
+    if "bottom" in bands:
+        canvas.paste(bands["bottom"], (0, top_height + img.height), bands["bottom"])
 
     buf = BytesIO()
-    img.save(buf, format="JPEG", quality=92)
+    canvas.save(buf, format="JPEG", quality=92)
     buf.seek(0)
     buf.name = "meme.jpg"
+    buf.layout = {"fmt": "meme", "top": top_text, "bottom": bottom_text}
+    buf.safety = {"bands": tuple(bands), "photo_box": (0, top_height, img.width, top_height + img.height)}
     return buf
 
 
@@ -307,12 +333,7 @@ def make_demotivator(image_bytes: bytes, caption: str, subtitle: str = "") -> By
     """Классический демотиватор: чёрное поле, тонкая белая рамка вокруг
     фото, курсивная подпись снизу (+ необязательная мелкая подстрочная
     строка)."""
-    img = Image.open(BytesIO(image_bytes)).convert("RGB")
-
-    max_photo_side = 900
-    if max(img.size) > max_photo_side:
-        ratio = max_photo_side / max(img.size)
-        img = img.resize((int(img.width * ratio), int(img.height * ratio)))
+    img = _prepare_photo(image_bytes, 900)
 
     border_black = 50       # чёрное поле вокруг белой рамки
     white_gap = 8            # отступ между фото и белой линией
@@ -330,8 +351,8 @@ def make_demotivator(image_bytes: bytes, caption: str, subtitle: str = "") -> By
     scratch = ImageDraw.Draw(Image.new("RGB", (10, 10)))
     max_text_width = canvas_w - 80
 
-    caption_lines = _wrap_text(scratch, caption, caption_font, max_text_width) if caption else []
-    subtitle_lines = _wrap_text(scratch, subtitle, subtitle_font, max_text_width) if subtitle else []
+    caption_lines = _wrap_text(scratch, caption, caption_font, max_text_width, True) if caption else []
+    subtitle_lines = _wrap_text(scratch, subtitle, subtitle_font, max_text_width, True) if subtitle else []
 
     line_gap = 10
 
@@ -367,7 +388,7 @@ def make_demotivator(image_bytes: bytes, caption: str, subtitle: str = "") -> By
         bbox = draw.textbbox((0, 0), line, font=caption_font)
         w = bbox[2] - bbox[0]
         h = bbox[3] - bbox[1]
-        draw.text(((canvas_w - w) / 2, y), line, font=caption_font, fill="white")
+        draw.text(((canvas_w - w) / 2 - bbox[0], y - bbox[1]), line, font=caption_font, fill="white")
         y += h + line_gap
 
     if subtitle_lines:
@@ -376,13 +397,14 @@ def make_demotivator(image_bytes: bytes, caption: str, subtitle: str = "") -> By
             bbox = draw.textbbox((0, 0), line, font=subtitle_font)
             w = bbox[2] - bbox[0]
             h = bbox[3] - bbox[1]
-            draw.text(((canvas_w - w) / 2, y), line, font=subtitle_font, fill="white")
+            draw.text(((canvas_w - w) / 2 - bbox[0], y - bbox[1]), line, font=subtitle_font, fill="white")
             y += h + line_gap
 
     buf = BytesIO()
     canvas.save(buf, format="JPEG", quality=92)
     buf.seek(0)
     buf.name = "demotivator.jpg"
+    buf.layout = {"fmt": "demotivator", "top": caption, "bottom": subtitle}
     return buf
 
 

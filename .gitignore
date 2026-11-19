@@ -21,3 +21,4 @@ renders.sqlite3-wal
 caption_sessions.sqlite3
 caption_sessions.sqlite3-shm
 caption_sessions.sqlite3-wal
+usage.sqlite3*

@@ -38,6 +38,7 @@ from PIL import Image
 import chatgen
 import stickers
 import ui
+import usage_stats
 
 router = Router(name="chatflow")
 
@@ -1253,6 +1254,7 @@ async def render(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
             caption=caption if i == 0 else None)
             for i, b in enumerate(pages)]
         await callback.message.answer_media_group(media)
+    usage_stats.record(callback.from_user.id, "chat")
     await callback.message.answer(
         f"готово, {len(pages)} шт. листаются по порядку" if len(pages) > 1 else "готово",
         reply_markup=after_kb())
