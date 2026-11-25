@@ -11,8 +11,6 @@ import random
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-import caption_safety
-
 FONTS_DIR = Path(__file__).parent / "fonts"
 
 # Старые идентификаторы остаются для совместимости импортов и тестов.
@@ -178,26 +176,17 @@ def _draw_caption(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeType
     return working_font.size
 
 
-def _prepare_photo(image_bytes: bytes, max_side: int) -> Image.Image:
+def _prepare_photo(image_bytes: bytes, max_side: int, *, pad: bool = True) -> Image.Image:
     with Image.open(BytesIO(image_bytes)) as original:
         image = ImageOps.exif_transpose(original).convert("RGB")
     image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+    if not pad:
+        return image
     # Very narrow photos need a usable canvas; never stretch or crop the photo.
     return ImageOps.expand(image, (
         max(0, (320 - image.width) // 2), max(0, (160 - image.height) // 2),
         max(0, (321 - image.width) // 2), max(0, (161 - image.height) // 2),
     ), fill="black")
-
-
-def _caption_panel(text: str, width: int) -> Image.Image:
-    """A readable black band whose height follows the complete caption."""
-    panel = Image.new("RGBA", (width, max(256, width * 2)))
-    size = _fit_font_size(width)
-    _draw_caption(ImageDraw.Draw(panel), text, _load_font(size, DEFAULT_FONT),
-                  DEFAULT_FONT, panel.size, "top", width - 28, max(2, size // 14),
-                  panel.height - 28, 14)
-    bbox = panel.getbbox()
-    return panel.crop((0, 0, width, bbox[3] + 14 if bbox else 28))
 
 
 LONG_PHRASE_CHARS = 50  # длиннее - одним блоком выглядит как стена мелкого текста в одном углу
@@ -271,7 +260,7 @@ def make_classic_meme(image_bytes: bytes, top_text: str, bottom_text: str,
     font_choice принят для совместимости, но больше не меняет шрифт.
     random_style разрешает перестановку только автоматически выбранной фразы.
     """
-    img = _prepare_photo(image_bytes, MAX_SIDE)
+    img = _prepare_photo(image_bytes, MAX_SIDE, pad=False)
 
     # --- визуальный рандом №1: расположение одноблочной фразы ---
     # если фраза не разбита через | на верх/низ:
@@ -296,36 +285,25 @@ def make_classic_meme(image_bytes: bytes, top_text: str, bottom_text: str,
                 if split:
                     top_text, bottom_text = split
 
-    protection = caption_safety.analyze(img)
-    overlays, bands = {}, {}
-    size = _fit_font_size(img.width)
+    # Fit captions on a transparent layer, never on an added black panel.
+    # A minimum text grid also handles tiny/extremely narrow inputs without
+    # stretching, cropping or adding borders to the photo itself.
+    layer = Image.new("RGBA", (max(320, img.width), max(160, img.height)))
+    size = _fit_font_size(layer.width)
     for position, text in (("top", top_text), ("bottom", bottom_text)):
-        layer = Image.new("RGBA", img.size)
-        used_size = _draw_caption(
+        _draw_caption(
             ImageDraw.Draw(layer), text, _load_font(size, DEFAULT_FONT), DEFAULT_FONT,
-            img.size, position, img.width - 28, max(2, size // 14), int(img.height * .32), 14)
-        box = layer.getbbox()
-        if box and (used_size < max(18, img.width // 40) or protection.overlaps(box, img.size)):
-            bands[position] = _caption_panel(text, img.width)
-        else:
-            overlays[position] = layer
-    top_height = bands["top"].height if "top" in bands else 0
-    bottom_height = bands["bottom"].height if "bottom" in bands else 0
-    canvas = Image.new("RGB", (img.width, img.height + top_height + bottom_height), "black")
-    canvas.paste(img, (0, top_height))
-    for layer in overlays.values():
-        canvas.paste(layer, (0, top_height), layer)
-    if "top" in bands:
-        canvas.paste(bands["top"], (0, 0), bands["top"])
-    if "bottom" in bands:
-        canvas.paste(bands["bottom"], (0, top_height + img.height), bands["bottom"])
+            layer.size, position, layer.width - 28, max(2, size // 14), int(layer.height * .32), 14)
+    if layer.size != img.size:
+        layer = layer.resize(img.size, Image.Resampling.LANCZOS)
+    img.paste(layer, (0, 0), layer)
 
     buf = BytesIO()
-    canvas.save(buf, format="JPEG", quality=92)
+    img.save(buf, format="JPEG", quality=92)
     buf.seek(0)
     buf.name = "meme.jpg"
     buf.layout = {"fmt": "meme", "top": top_text, "bottom": bottom_text}
-    buf.safety = {"bands": tuple(bands), "photo_box": (0, top_height, img.width, top_height + img.height)}
+    buf.safety = {"bands": (), "photo_box": (0, 0, img.width, img.height)}
     return buf
 
 

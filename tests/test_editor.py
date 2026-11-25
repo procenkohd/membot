@@ -14,7 +14,6 @@ from PIL import Image, ImageDraw
 _DATA = tempfile.TemporaryDirectory()
 os.environ["DATA_DIR"] = _DATA.name
 import bot
-import caption_safety
 import memegen
 import usage_stats
 from aiogram.fsm.context import FSMContext
@@ -54,32 +53,40 @@ class CaptionInputTests(unittest.TestCase):
 
 
 class SafeCaptionTests(unittest.TestCase):
-    def test_detected_face_moves_only_overlapping_caption_outside_photo(self):
-        protected = caption_safety.Protection(100, 100, ((0, 0, 100, 30),), bytes(10000))
-        with patch.object(caption_safety, "analyze", return_value=protected):
-            result = memegen.make_classic_meme(photo(), "лицо здесь", "снизу свободно")
-        self.assertEqual(result.safety["bands"], ("top",))
-        self.assertGreater(Image.open(result).height, 800)
+    def test_busy_photo_never_adds_bands(self):
+        image = Image.new("RGB", (600, 800), "gray")
+        ImageDraw.Draw(image).rectangle((40, 0, 550, 280), fill="red")
+        source = BytesIO()
+        image.save(source, "PNG")
+        result = memegen.make_classic_meme(source.getvalue(), "лицо здесь", "снизу свободно")
+        self.assertEqual(result.safety["bands"], ())
+        self.assertEqual(Image.open(result).size, image.size)
+        self.assertEqual(result.safety["photo_box"], (0, 0, 600, 800))
         self.assertEqual(result.layout["top"], "лицо здесь")
 
-    def test_detection_failure_uses_bands_not_overlap(self):
-        with patch.object(caption_safety, "_analyze", side_effect=RuntimeError("test")), \
-                self.assertLogs("caption_safety", level="ERROR"):
-            result = memegen.make_classic_meme(photo(), "верх", "низ")
-        self.assertEqual(result.safety["bands"], ("top", "bottom"))
+    def test_tiny_and_narrow_photos_are_not_padded(self):
+        for size in [(1, 2000), (2000, 1), (64, 64), (180, 500)]:
+            expected = Image.open(BytesIO(photo(size)))
+            expected.thumbnail((memegen.MAX_SIDE, memegen.MAX_SIDE))
+            result = memegen.make_classic_meme(photo(size), "Щ" * 500, "низ")
+            self.assertEqual(Image.open(result).size, expected.size)
+            self.assertEqual(result.safety["bands"], ())
 
-    def test_detail_heuristic_protects_salient_patch(self):
-        image = Image.new("RGB", (384, 384), "gray")
-        ImageDraw.Draw(image).rectangle((40, 20, 330, 100), fill="red")
-        protection = caption_safety.analyze(image)
-        self.assertTrue(protection.overlaps((40, 20, 330, 100), image.size))
-        self.assertFalse(protection.overlaps((40, 280, 330, 350), image.size))
+    def test_random_and_saved_layout_render_without_bands(self):
+        with patch.object(memegen.random, "random", return_value=.1):
+            result = memegen.make_classic_meme(photo(), "", "обычная подпись", random_style=True)
+        self.assertEqual(result.layout["top"], "обычная подпись")
+        repeated = bot.render_by_spec(photo(), {"kind": "random", "layout": result.layout})
+        self.assertEqual(Image.open(repeated).size, (600, 800))
+        self.assertEqual(result.getvalue(), repeated.getvalue())
 
     def test_full_caption_stays_inside_canvas(self):
-        for size in [(900, 1200), (320, 160), (1, 2000), (2000, 1), (64, 64)]:
+        for size in [(900, 1200), (1200, 400), (320, 160), (64, 64)]:
             for caption in ["ДОКАЗАТЕЛЬСТВО ТОГО,", "Щ" * 500, "слово " * 80]:
                 result = memegen.make_classic_meme(photo(size), caption, "низ")
                 image = Image.open(result).convert("RGB")
+                self.assertEqual(image.size, size)
+                self.assertEqual(result.safety["bands"], ())
                 # JPEG-tolerant outer edge check: no white text touches an edge.
                 for edge in [image.crop((0, 0, 1, image.height)),
                              image.crop((image.width-1, 0, image.width, image.height)),
